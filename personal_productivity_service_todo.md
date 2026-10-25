@@ -8,35 +8,39 @@ The most important architectural decision is to make the background services, ti
 
 ## 1. Project foundation and installation
 
-- [ ] Establish the C++ project structure, build configuration, and module boundaries.
-- [ ] Use Qt 6.12 for the application, UI, background operation, and system integration wherever practical.
-- [ ] Use SVG icons throughout the UI and system tray wherever supported.
-- [ ] Create `setup.sh` that assumes the repository is already cloned and:
-  - [ ] Detects the current Linux distribution and available package manager.
-  - [ ] Installs or verifies required build dependencies.
-  - [ ] Configures and builds the application.
-  - [ ] Installs the application into the current system.
-  - [ ] Installs the required runtime assets, icons, configuration templates, and service files.
-  - [ ] Configures the application to start automatically on login.
-  - [ ] Supports clean reinstallation and upgrades.
-- [ ] Create a separate installation/bootstrap script that:
-  - [ ] Clones the repository into a defined location.
-  - [ ] Invokes the repository's `setup.sh`.
-  - [ ] Stops safely if cloning or installation fails.
-- [ ] Keep user data, settings, credentials, and application binaries in appropriate separate locations.
-- [ ] Provide an uninstall path that removes installed application files without deleting user data by default.
-- [ ] Add logging, error reporting, and clear installation diagnostics.
+- [x] Establish the C++ project structure, build configuration, and module boundaries.
+- [x] Use Qt 6.12 for the application, UI, background operation, and system integration wherever practical.
+- [x] Use SVG icons throughout the UI and system tray wherever supported.
+- [x] Create `setup.sh` that assumes the repository is already cloned and:
+  - [x] Detects the current Linux distribution and available package manager.
+  - [x] Installs or verifies required build dependencies.
+  - [x] Configures and builds the application.
+  - [x] Installs the application into the current system.
+  - [x] Installs the required runtime assets, icons, configuration templates, and service files.
+  - [x] Configures the application to start automatically on login.
+  - [x] Supports clean reinstallation and upgrades.
+- [x] Create a separate installation/bootstrap script that:
+  - [x] Clones the repository into a defined location.
+  - [x] Invokes the repository's `setup.sh`.
+  - [x] Stops safely if cloning or installation fails.
+- [x] Keep user data, settings, credentials, and application binaries in appropriate separate locations.
+  - [x] Store application data and logs under Qt's per-user local-data location.
+  - [x] Store preferences under Qt's per-user configuration location.
+  - [x] Store authentication credentials in the operating system credential store.
+  - [x] Install application binaries and bundled Qt runtime files under the configured installation prefix.
+- [x] Provide an uninstall path that removes installed application files without deleting user data by default.
+- [x] Add logging, error reporting, and clear installation diagnostics.
 
 ## 2. Background application and system tray
 
-- [ ] Run as a background application without requiring an open window.
-- [ ] Provide a system tray icon with a context menu.
-- [ ] Allow the main window to be opened and hidden without stopping background services.
-- [ ] Support launching automatically when the user logs into the desktop.
-- [ ] Prevent accidental duplicate application instances.
-- [ ] Provide controls to exit, restart services, open settings, and view active timers.
-- [ ] Ensure background operations continue while the main window is hidden.
-- [ ] Handle application shutdown cleanly, including pending operations and persistent state.
+- [x] Run as a background application without requiring an open window.
+- [x] Provide a system tray icon with a context menu.
+- [x] Allow the main window to be opened and hidden without stopping background services.
+- [x] Support launching automatically when the user logs into the desktop.
+- [x] Prevent accidental duplicate application instances.
+- [x] Provide controls to exit, restart services, open settings, and view active timers.
+- [x] Ensure background operations continue while the main window is hidden.
+- [x] Handle application shutdown cleanly, including pending operations and persistent state.
 
 ## 3. Microsoft Outlook integration
 
@@ -91,17 +95,18 @@ The most important architectural decision is to make the background services, ti
 
 ## 6. TODO manager
 
-- [ ] Create, edit, complete, reopen, and delete TODO items.
-- [ ] Give each item a title, description, status, creation time, and optional deadline.
+- [x] Create, edit, complete, reopen, and delete TODO items.
+- [x] Give each item a title, description, status, creation time, and optional deadline.
 - [ ] Support linking TODOs to:
-  - [ ] Local files.
-  - [ ] Websites.
+  - [x] Local files.
+  - [x] Websites.
   - [ ] Emails stored in the mail service.
-  - [ ] Persistent or quick notes in the note service.
-- [ ] Allow links to be opened from the TODO item.
-- [ ] Preserve links using stable identifiers where possible, rather than fragile display names.
-- [ ] Display upcoming, overdue, completed, and unscheduled tasks.
-- [ ] Allow manual creation and editing of deadlines.
+  - [x] Persistent notes in the note service.
+  - [x] Quick notes in the note service.
+- [x] Allow links to be opened from the TODO item.
+- [x] Preserve links using stable identifiers where possible, rather than fragile display names.
+- [x] Display upcoming, overdue, completed, and unscheduled tasks.
+- [x] Allow manual creation and editing of deadlines.
 - [ ] Support automatic TODO creation for important email senders.
 - [ ] Prevent duplicate TODO creation when the same email is encountered during synchronization.
 - [ ] Route all deadline reminders through the shared timer and notification service.
@@ -125,15 +130,15 @@ When an email from an important sender arrives, create a TODO with a deadline de
 
 This is the central piece of the application. Email notifications, TODO deadlines, countdown timers, and drink reminders should use shared infrastructure while retaining their own scheduling policies.
 
-- [ ] Implement a centralized timer service.
-- [ ] Represent scheduled events with stable IDs, deadlines, status, and notification policy.
-- [ ] Use absolute timestamps for deadlines and a monotonic clock for elapsed-time measurements where appropriate.
-- [ ] Persist timers and scheduled TODO deadlines across application restarts.
-- [ ] Support cancellation, rescheduling, pausing where applicable, and completion.
+- [x] Implement a centralized timer service.
+- [x] Represent scheduled events with stable IDs, deadlines, status, and notification policy.
+- [ ] Use absolute timestamps for deadlines and a monotonic clock for elapsed-time measurements where appropriate. Persistent deadlines are stored as UTC timestamps; monotonic elapsed-time tracking remains unimplemented.
+- [ ] Persist timers and scheduled TODO deadlines across application restarts. Countdown timers and TODO deadline fields persist; scheduling TODO reminders through the timer engine remains pending.
+- [x] Support cancellation, rescheduling, pausing where applicable, and completion.
 - [ ] Handle sleep, suspend/resume, clock changes, and missed notifications.
-- [ ] Prevent duplicate reminders after restarts or synchronization retries.
-- [ ] Provide a unified overview of active timers and upcoming deadlines.
-- [ ] Route desktop notifications through one notification coordinator.
+- [x] Prevent duplicate reminders after restarts or synchronization retries.
+- [x] Provide a unified overview of active timers and upcoming deadlines.
+- [x] Route desktop notifications through one notification coordinator.
 - [ ] Update an existing countdown notification when supported, rather than creating a new notification every second.
 - [ ] Fall back gracefully when the desktop notification service does not support notification updates.
 
@@ -170,54 +175,58 @@ Recurring timers are different:
 
 ## 9. Notes system
 
-- [ ] Implement two note workflows:
-  - [ ] **Quick notes:** capture information rapidly and discard it without ceremony.
-  - [ ] **Persistent notes:** store information until explicitly deleted.
-- [ ] Make quick-note creation accessible without opening a complicated editor.
-- [ ] Allow persistent notes to be created, edited, searched, and deleted.
-- [ ] Support Markdown, HTML, or both for persistent note content.
-- [ ] Preserve note formatting when saving and reopening.
-- [ ] Use stable note IDs for TODO links.
-- [ ] Ensure deleting a note does not silently corrupt TODOs that reference it.
-- [ ] Persist notes locally and recover them after application restarts.
-- [ ] Add autosave or another reliable mechanism to prevent accidental loss of edits.
-- [ ] Keep quick-note dismissal separate from permanent-note deletion.
+- [x] Implement two note workflows:
+  - [x] **Quick notes:** capture information rapidly and discard it without ceremony.
+  - [x] **Persistent notes:** store information until explicitly deleted.
+- [x] Make quick-note creation accessible without opening a complicated editor.
+- [x] Allow persistent notes to be created, edited, searched, and deleted.
+- [x] Support Markdown, HTML, or both for persistent note content.
+- [x] Preserve note formatting when saving and reopening.
+- [x] Use stable note IDs for TODO links.
+- [x] Ensure deleting a note does not silently corrupt TODOs that reference it.
+- [x] Persist notes locally and recover them after application restarts.
+- [x] Add autosave or another reliable mechanism to prevent accidental loss of edits.
+- [x] Keep quick-note dismissal separate from permanent-note deletion.
 
 ## 10. Manual countdown timers
 
-- [ ] Provide a UI for creating a countdown timer.
-- [ ] Allow the duration to be entered in hours, minutes, and seconds.
-- [ ] Start, cancel, and inspect active timers.
-- [ ] Display the remaining time in the main UI and timer overview.
+- [x] Provide a UI for creating a countdown timer.
+- [x] Allow the duration to be entered in hours, minutes, and seconds.
+- [x] Start, cancel, and inspect active timers.
+- [x] Display the remaining time in the main UI and timer overview.
 - [ ] Route approaching-deadline reminders through the shared timer engine.
-- [ ] Notify when a countdown finishes.
-- [ ] Allow multiple independent timers to run simultaneously.
-- [ ] Persist active timers across application restarts.
-- [ ] Define whether users can pause and resume countdowns.
+- [x] Notify when a countdown finishes.
+- [x] Allow multiple independent timers to run simultaneously.
+- [x] Persist active timers across application restarts.
+- [x] Allow users to pause and resume countdowns while preserving the remaining duration.
+- [x] Allow a default countdown duration to be configured and prefilled for new timers.
 
 ## 11. Settings and configuration
 
-- [ ] Provide a central settings interface.
+- [x] Provide a central settings interface.
 - [ ] Configure Outlook authentication and mail synchronization.
+  - [x] Add per-service settings for the Microsoft Entra tenant and public-client application ID.
+  - [x] Implement Microsoft device-code sign-in and store tokens using Secret Service.
+  - [ ] Implement token refresh, connection recovery, and mail synchronization.
 - [ ] Configure ignored senders, ignored folders, and important senders.
 - [ ] Configure recurring drink reminders.
 - [ ] Configure automatic mail-scan intervals.
 - [ ] Configure notification behavior where supported.
-- [ ] Configure startup behavior and background-service operation.
-- [ ] Store preferences persistently.
-- [ ] Validate settings before applying them.
-- [ ] Provide sensible defaults and a way to restore them.
+- [x] Configure startup behavior and background-service operation.
+- [x] Store preferences persistently.
+- [x] Validate settings before applying them.
+- [x] Provide sensible defaults and a way to restore them.
 
 ## 12. Reliability, security, and diagnostics
 
-- [ ] Use structured application logs with timestamps, severity levels, and subsystem identifiers.
-- [ ] Log synchronization failures and timer scheduling errors without exposing message bodies or secrets.
+- [x] Use structured application logs with timestamps, severity levels, and subsystem identifiers.
+- [ ] Log synchronization failures and timer scheduling errors without exposing message bodies or secrets. Timer scheduling failures log only database error metadata; mail synchronization logging remains pending.
 - [ ] Provide useful diagnostics for authentication, connectivity, and API failures.
 - [ ] Handle temporary network outages without crashing or losing state.
-- [ ] Use transactional or otherwise crash-safe persistence for important state changes.
-- [ ] Ensure service failures in one subsystem do not bring down the whole application.
-- [ ] Validate external input, including email HTML, links, and imported data.
-- [ ] Avoid hardcoding credentials, tokens, or machine-specific paths.
+- [x] Use transactional or otherwise crash-safe persistence for important state changes. Multi-statement changes use transactions; individual inserts, updates, and deletes are atomic database statements.
+- [x] Ensure service failures in one subsystem do not bring down the whole application. Timer, notes, and TODO initialization fail independently and show an unavailable tab; the shared database remains a required foundation.
+- [ ] Validate external input, including email HTML, links, and imported data. Website TODO links require a valid HTTP(S) URL with a host and no embedded credentials; email HTML and imported data remain pending.
+- [x] Avoid hardcoding credentials, tokens, or machine-specific paths. No credentials or tokens are embedded; user data uses Qt standard locations and the install prefix is configurable.
 - [ ] Provide automated tests for deadline calculation, timer scheduling, mail deduplication, and persistence.
 - [ ] Test application restart, system suspend/resume, and missed-notification recovery.
 - [ ] Keep the UI responsive while background operations run.
@@ -265,9 +274,9 @@ These milestones give Codex a sensible order of work, with a testable result aft
 **Scope:** Project skeleton, CMake, `setup.sh`, clone-and-install script, tray icon, logging, and SQLite.
 
 Acceptance checks:
-- [ ] Clean build.
-- [ ] Installation works.
-- [ ] App starts in the background.
+- [x] Clean build.
+- [x] Installation works.
+- [x] App starts in the background.
 
 ### Milestone 2 — Shared scheduler
 

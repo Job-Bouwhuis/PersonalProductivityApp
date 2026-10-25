@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Personal Productivity Service
+Comment=Start the productivity service in the background
+Exec=personal-productivity-app --background
+TryExec=personal-productivity-app
+Terminal=false
+X-GNOME-Autostart-enabled=true

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Personal Productivity Service
+GenericName=Personal Productivity Service
+Comment=Personal productivity tools and reminders
+Exec=personal-productivity-app
+Icon=personal-productivity-app
+Terminal=false
+Categories=Utility;
+StartupNotify=true
