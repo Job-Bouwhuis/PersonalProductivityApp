@@ -1,11 +1,14 @@
 #pragma once
 
 #include <QDateTime>
+#include <QJsonObject>
 #include <QObject>
 #include <QNetworkAccessManager>
 #include <QPointer>
 #include <QTimer>
 #include <QUrl>
+
+#include <functional>
 
 class QNetworkReply;
 
@@ -18,7 +21,11 @@ public:
     explicit OutlookAuthService(QObject* parent = nullptr);
 
     void connectAccount(const QString& tenant, const QString& clientId);
+    void restoreConnectionStatus(const QString& tenant, const QString& clientId);
     void disconnectAccount();
+    void withValidAccessToken(const QString& tenant, const QString& clientId,
+                              std::function<void(const QString& token, const QString& error)> callback,
+                              bool forceRefresh = false);
 
 signals:
     void statusChanged(const QString& status);
@@ -30,6 +37,7 @@ private:
     void pollForToken();
     void finishFailure(const QString& message);
     bool storeCredentials(const QByteArray& json);
+    bool loadCredentials(QJsonObject& credentials, QString& error) const;
     bool clearCredentials();
 
     QNetworkAccessManager network_;

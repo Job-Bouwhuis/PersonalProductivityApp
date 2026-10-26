@@ -21,6 +21,8 @@
 #include "DeadlineMonitor.h"
 #include "NotesService.h"
 #include "ApplicationSettings.h"
+#include "MicrosoftGraphClient.h"
+#include "MailIndexService.h"
 #include "OutlookAuthService.h"
 #include "AutostartService.h"
 #include "TodoService.h"
@@ -110,12 +112,20 @@ int main(int argc, char* argv[])
         qCWarning(startupLog) << "TODO service is unavailable; continuing with other services";
     productivity::services::ApplicationSettings settings;
     productivity::services::OutlookAuthService outlookAuthService(&app);
+    productivity::services::MicrosoftGraphClient graphClient(settings, outlookAuthService, &app);
+    productivity::services::MailIndexService mailIndexService(database.connection());
+    const bool mailIndexReady = mailIndexService.initialize();
+    if (!mailIndexReady)
+        qCWarning(startupLog) << "Outlook message indexing is unavailable";
     productivity::services::AutostartService autostartService;
     productivity::services::DeadlineMonitor* deadlineMonitorControl = nullptr;
     if (!autostartService.setEnabled(settings.startOnLogin()))
         qCWarning(startupLog) << "Could not apply the saved login startup preference";
 
     const bool trayAvailable = QSystemTrayIcon::isSystemTrayAvailable();
+    QSystemTrayIcon trayIcon(QIcon(":/app.svg"));
+    trayIcon.setToolTip("Personal Productivity Service");
+    productivity::infrastructure::NotificationCoordinator notificationCoordinator(&trayIcon);
 
     ProductivityWindow window;
     window.setWindowTitle("Personal Productivity Service");
@@ -157,7 +167,8 @@ int main(int argc, char* argv[])
         tabs->addTab(unavailableServicePage(QStringLiteral("TODO manager"), tabs), QStringLiteral("TODOs"));
     }
     tabs->addTab(notesPage, QStringLiteral("Notes"));
-    tabs->addTab(new productivity::ui::SettingsWidget(settings, outlookAuthService, trayAvailable,
+    tabs->addTab(new productivity::ui::SettingsWidget(settings, outlookAuthService, graphClient,
+        mailIndexService, trayAvailable,
         [&autostartService](bool enabled) { return autostartService.setEnabled(enabled); },
         [&window](bool closeToTray) {
             window.setHideToTray(closeToTray);
@@ -169,6 +180,8 @@ int main(int argc, char* argv[])
         [&deadlineMonitorControl] {
             if (deadlineMonitorControl)
                 deadlineMonitorControl->restart();
+        }, [&notificationCoordinator](const QString& title, const QString& message) {
+            return notificationCoordinator.notify(title, message);
         }, tabs), QStringLiteral("Settings"));
     window.setCentralWidget(tabs);
 
@@ -181,8 +194,6 @@ int main(int argc, char* argv[])
     trayMenu.addSeparator();
     QAction* quitAction = trayMenu.addAction("Exit");
 
-    QSystemTrayIcon trayIcon(QIcon(":/app.svg"));
-    trayIcon.setToolTip("Personal Productivity Service");
     trayIcon.setContextMenu(&trayMenu);
 
     QObject::connect(showAction, &QAction::triggered, &window, [&window] {
@@ -233,7 +244,6 @@ int main(int argc, char* argv[])
         trayIcon.show();
     }
 
-    productivity::infrastructure::NotificationCoordinator notificationCoordinator(&trayIcon);
     std::unique_ptr<productivity::services::DeadlineMonitor> deadlineMonitor;
     if (timersReady) {
         deadlineMonitor = std::make_unique<productivity::services::DeadlineMonitor>(timerService, notificationCoordinator, &app);

@@ -44,32 +44,32 @@ The most important architectural decision is to make the background services, ti
 
 ## 3. Microsoft Outlook integration
 
-- [ ] Authenticate through Microsoft's official authentication and mail APIs.
-- [ ] Use Microsoft Graph with the appropriate Microsoft identity platform authentication flow and permissions.
-- [ ] Store authentication tokens securely using the operating system's available credential storage.
-- [ ] Provide connection, disconnection, and authentication recovery flows.
-- [ ] Retrieve inbox messages and maintain a local index of previously discovered mail.
-- [ ] On first startup, perform a full initial inbox scan.
-- [ ] Provide a manual **Scan all mail** action to perform a full reconciliation scan.
-- [ ] For subsequent scans, retrieve only new or changed mail without repeatedly scanning the entire inbox.
-- [ ] Persist synchronization state so application restarts do not trigger unnecessary full scans.
-- [ ] Handle pagination, API throttling, connectivity failures, and expired credentials.
-- [ ] Prefer change notifications or delta queries where supported, with polling as a fallback.
-- [ ] Keep message identifiers stable so TODOs and notes can link to the original email.
+- [x] Authenticate through Microsoft's official authentication and mail APIs; Microsoft identity platform device-code flow obtains delegated tokens and Microsoft Graph v1.0 handles mail requests.
+- [x] Use Microsoft Graph 1.0 with Microsoft identity platform device-code sign-in and delegated Mail.ReadWrite and Mail.Send scopes for the signed-in mailbox.
+- [x] Store authentication tokens securely using the operating system's available credential storage. Outlook access and refresh tokens are stored through Linux Secret Service using `secret-tool`, not in the application database.
+- [x] Provide connection, disconnection, and authentication recovery flows. Outlook setup uses account-type choices with a custom-tenant option and client-ID validation; device sign-in opens the browser, copies the code, and closes its dialog after credentials are stored. Saved connection state is restored asynchronously, configuration mismatches are rejected before token refresh, and revoked credentials are cleared with a reconnect prompt.
+- [x] Retrieve mailbox messages and maintain a local index of previously discovered mail. The Outlook settings action indexes the latest mailbox page (up to 100) into SQLite, updating existing message metadata without storing bodies and retaining each message's parent folder ID.
+- [x] On first startup with a saved Outlook connection, perform a paginated initial mailbox scan and persist its completion state; Graph's opaque next-page URL is preserved, and failed scans remain eligible for retry on the next connection.
+- [x] Provide a manual **Scan all mail** action to perform a paginated full mailbox re-index, updating indexed message metadata and folder IDs.
+- [x] For subsequent scans, retrieve only new or changed mail without repeatedly scanning the entire inbox. Outlook connections after the initial mailbox scan perform per-folder Microsoft Graph delta synchronization; **Sync mail changes** can run it manually. Folder delta links are saved locally and deleted-message changes remove rows from the local index.
+- [x] Persist initial mailbox scan completion state so application restarts do not trigger unnecessary full scans.
+- [x] Handle pagination, API throttling, connectivity failures, and expired credentials. Graph retries transient transport errors and throttling/service-unavailable responses with bounded backoff and `Retry-After`; HTTP 401 forces one token refresh, then asks the user to reconnect if rejected again.
+- [x] Prefer change notifications or delta queries where supported, with polling as a fallback. Per-folder delta sync runs after the initial scan and on Outlook reconnect; while connected, a five-minute polling timer starts another delta round when idle. The timer stops when Outlook is disconnected.
+- [x] Keep message identifiers stable so TODOs and notes can link to the original email. Graph mail requests use `Prefer: IdType="ImmutableId"`; saved legacy IDs are translated in batches before delta sync, merging duplicates safely.
 
 ## 4. Email notifications, filtering, and mail views
 
-- [ ] Notify the desktop when new mail arrives.
-- [ ] Avoid repeatedly notifying for messages already processed.
+- [x] Notify the desktop when new mail arrives. Incremental synchronization sends a desktop alert for newly indexed messages, with batch notifications summarized to avoid flooding.
+- [x] Avoid repeatedly notifying for messages already processed. Notifications are emitted only for message IDs inserted into the persistent local index; initial and manual full scans stay silent.
 - [ ] Allow an individual email to be marked as:
   - [ ] Ignored.
   - [ ] Important.
-- [ ] Maintain configurable ignored-sender rules.
-- [ ] Maintain configurable ignored-folder rules.
-- [ ] Automatically mark messages from ignored senders as read in Microsoft 365/Outlook itself.
-- [ ] Automatically mark messages in ignored folders as read in the remote mail service.
-- [ ] Apply rules to incoming mail and reconcile rules against existing messages when appropriate.
-- [ ] Handle failures to update remote read status and retry safely.
+- [x] Maintain configurable ignored-sender rules. Outlook settings can add and remove exact sender email addresses; values are stored in persistent settings and deduplicated case-insensitively. Delta synchronization applies these rules to incoming and changed messages; adding a sender rule queues all indexed folders for reconciliation against existing mail.
+- [x] Maintain configurable ignored-folder rules. Outlook settings can load the connected mailbox's folder hierarchy, add/remove selected folders, and persist each exact folder ID with its display path. Rules apply only to the selected folder.
+- [x] Automatically mark messages from ignored senders as read in Microsoft 365/Outlook itself. Delta sync patches matching unread messages through Graph, updates the local index, and suppresses new-mail alerts for those ignored senders.
+- [x] Automatically mark messages in ignored folders as read in the remote mail service. Delta sync marks unread messages in explicitly selected folders as read through Graph and updates the local index after Microsoft confirms success. Adding a folder rule queues a full sync of that folder to include existing unread messages.
+- [x] Apply rules to incoming mail and reconcile rules against existing messages when appropriate. Delta synchronization applies current rules to incoming/changed messages; adding a sender rule queues all indexed folders, while adding a folder rule queues only that folder. Rescan requests persist until a successful folder scan completes.
+- [x] Handle failures to update remote read status and retry safely. Graph retries transient failures; if a read-state update still fails, sync stops before saving the folder delta cursor so the batch is replayed next time.
 - [ ] Provide an **Unread mail** view:
   - [ ] Include unread messages across all accessible folders, not just the inbox.
   - [ ] Sort newest first.
@@ -204,10 +204,11 @@ Recurring timers are different:
 ## 11. Settings and configuration
 
 - [x] Provide a central settings interface.
-- [ ] Configure Outlook authentication and mail synchronization.
+- [x] Configure Outlook authentication and mail synchronization.
   - [x] Add per-service settings for the Microsoft Entra tenant and public-client application ID.
-  - [x] Implement Microsoft device-code sign-in and store tokens using Secret Service.
-  - [ ] Implement token refresh, connection recovery, and mail synchronization.
+  - [x] Implement Microsoft device-code sign-in and store tokens using Secret Service; personal accounts use the `common` or `consumers` tenant with a matching app registration.
+  - [x] Add a Microsoft Graph client with bearer-authenticated message listing, mark-read, and send-mail operations, plus access-token refresh.
+  - [x] Implement complete mail synchronization, local indexing, and connection recovery. Synchronization and local indexing use paginated scans and per-folder delta links; authentication recovery rejects mismatched settings and clears revoked credentials with a reconnect prompt.
 - [ ] Configure ignored senders, ignored folders, and important senders.
 - [ ] Configure recurring drink reminders.
 - [ ] Configure automatic mail-scan intervals.
@@ -221,7 +222,7 @@ Recurring timers are different:
 
 - [x] Use structured application logs with timestamps, severity levels, and subsystem identifiers.
 - [ ] Log synchronization failures and timer scheduling errors without exposing message bodies or secrets. Timer scheduling failures log only database error metadata; mail synchronization logging remains pending.
-- [ ] Provide useful diagnostics for authentication, connectivity, and API failures.
+- [ ] Provide useful diagnostics for authentication, connectivity, and API failures. Device-code sign-in now shows Microsoft's sanitized error description and AADSTS code; broader diagnostics remain pending.
 - [ ] Handle temporary network outages without crashing or losing state.
 - [x] Use transactional or otherwise crash-safe persistence for important state changes. Multi-statement changes use transactions; individual inserts, updates, and deletes are atomic database statements.
 - [x] Ensure service failures in one subsystem do not bring down the whole application. Timer, notes, and TODO initialization fail independently and show an unavailable tab; the shared database remains a required foundation.
@@ -338,7 +339,7 @@ A few details have a significant impact on the implementation. Establish these u
 
 - [ ] **Mail synchronization:** use Microsoft Graph delta queries to track changes incrementally, with a configurable polling interval. Consider Graph change notifications later if their setup is worthwhile.
 - [ ] **Folder coverage:** explicitly decide whether unread mail includes every mail folder, including archive folders and nested folders, or only folders accessible through the connected mailbox.
-- [ ] **Ignored folders:** define whether ignoring a folder applies recursively to subfolders and whether the rule should mark existing messages as read.
+- [x] **Ignored folders:** rules apply only to the selected folder, not subfolders. Adding a rule queues the next sync to mark existing unread messages in that folder as read.
 - [ ] **Important emails:** decide what happens when one message matches both ignored and important rules. Suggested default: explicit ignore rules take precedence.
 - [ ] **Late imports:** decide whether an important email discovered hours or days after arrival gets its original deadline, an adjusted deadline, or an immediate TODO.
 - [ ] **Notification persistence:** desktop notifications can disappear or behave differently between desktop environments. The app's own timer overview should remain authoritative.

@@ -40,7 +40,13 @@ add_library(productivity_services STATIC
     src/services/DeadlineMonitor.cpp
     src/services/ApplicationSettings.cpp
     src/services/AutostartService.cpp
+    src/services/MailIndexService.cpp
+    src/services/MailIndexService.h
+    src/services/MailDeltaSyncService.cpp
+    src/services/MailDeltaSyncService.h
     src/services/NotesService.cpp
+    src/services/MicrosoftGraphClient.cpp
+    src/services/MicrosoftGraphClient.h
     src/services/OutlookAuthService.cpp
     src/services/OutlookAuthService.h
     src/services/TodoService.cpp

@@ -1,5 +1,7 @@
 #include "ApplicationSettings.h"
 
+#include <QSet>
+
 namespace productivity::services {
 
 bool ApplicationSettings::startMinimized() const
@@ -32,6 +34,16 @@ QString ApplicationSettings::outlookClientId() const
     return settings_.value(QStringLiteral("outlook/clientId")).toString();
 }
 
+QStringList ApplicationSettings::ignoredSenderRules() const
+{
+    return settings_.value(QStringLiteral("outlook/ignoredSenders")).toStringList();
+}
+
+QVariantMap ApplicationSettings::ignoredFolderRules() const
+{
+    return settings_.value(QStringLiteral("outlook/ignoredFolders")).toMap();
+}
+
 void ApplicationSettings::setStartMinimized(bool enabled)
 {
     settings_.setValue(QStringLiteral("application/startMinimized"), enabled);
@@ -57,6 +69,33 @@ void ApplicationSettings::setOutlookConfiguration(const QString& tenant, const Q
 {
     settings_.setValue(QStringLiteral("outlook/tenant"), tenant.trimmed());
     settings_.setValue(QStringLiteral("outlook/clientId"), clientId.trimmed());
+}
+
+void ApplicationSettings::setIgnoredSenderRules(const QStringList& senders)
+{
+    QStringList normalized;
+    QSet<QString> seen;
+    for (const QString& sender : senders) {
+        const QString trimmed = sender.trimmed();
+        const QString key = trimmed.toCaseFolded();
+        if (trimmed.isEmpty() || seen.contains(key))
+            continue;
+        seen.insert(key);
+        normalized.append(trimmed);
+    }
+    settings_.setValue(QStringLiteral("outlook/ignoredSenders"), normalized);
+}
+
+void ApplicationSettings::setIgnoredFolderRules(const QVariantMap& folderPathsById)
+{
+    QVariantMap normalized;
+    for (auto it = folderPathsById.cbegin(); it != folderPathsById.cend(); ++it) {
+        const QString id = it.key().trimmed();
+        const QString path = it.value().toString().trimmed();
+        if (!id.isEmpty() && !path.isEmpty())
+            normalized.insert(id, path);
+    }
+    settings_.setValue(QStringLiteral("outlook/ignoredFolders"), normalized);
 }
 
 void ApplicationSettings::restoreDefaults()
