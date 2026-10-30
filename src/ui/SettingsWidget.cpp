@@ -5,6 +5,7 @@
 #include "MailDeltaSyncService.h"
 #include "MicrosoftGraphClient.h"
 #include "OutlookAuthService.h"
+#include "WorkDescriptorService.h"
 
 #include <QCheckBox>
 #include <QApplication>
@@ -55,6 +56,8 @@ SettingsWidget::SettingsWidget(services::ApplicationSettings& settings,
                                services::OutlookAuthService& outlookAuthService,
                                services::MicrosoftGraphClient& graphClient,
                                services::MailIndexService& mailIndexService,
+                               services::MailDeltaSyncService& mailDeltaSync,
+                               services::WorkDescriptorService& workService,
                                bool trayAvailable,
                                std::function<bool(bool)> startOnLoginChanged,
                                std::function<void(bool)> closeToTrayChanged,
@@ -67,12 +70,13 @@ SettingsWidget::SettingsWidget(services::ApplicationSettings& settings,
     , outlookAuthService_(outlookAuthService)
     , graphClient_(graphClient)
     , mailIndexService_(mailIndexService)
+    , mailDeltaSync_(mailDeltaSync)
+    , workService_(workService)
     , startOnLoginChanged_(std::move(startOnLoginChanged))
     , defaultCountdownChanged_(std::move(defaultCountdownChanged))
     , restartServices_(std::move(restartServices))
     , notify_(std::move(notify))
 {
-    mailDeltaSync_ = new services::MailDeltaSyncService(graphClient_, mailIndexService_, settings_, this);
     auto* layout = new QVBoxLayout(this);
     auto* serviceTabs = new QTabWidget(this);
     auto* applicationPage = new QWidget(serviceTabs);
@@ -103,6 +107,51 @@ SettingsWidget::SettingsWidget(services::ApplicationSettings& settings,
         unavailable->setWordWrap(true);
         applicationLayout->addWidget(unavailable);
     }
+    auto* trustedDomainsTitle = new QLabel(QStringLiteral("Trusted email link domains"), applicationPage);
+    QFont trustedDomainsFont = trustedDomainsTitle->font();
+    trustedDomainsFont.setBold(true);
+    trustedDomainsTitle->setFont(trustedDomainsFont);
+    applicationLayout->addWidget(trustedDomainsTitle);
+    auto* trustedDomainsHelp = new QLabel(
+        QStringLiteral("Domains you chose to always trust in an email link prompt. Trust applies to the exact domain; subdomains require separate approval."),
+        applicationPage);
+    trustedDomainsHelp->setWordWrap(true);
+    applicationLayout->addWidget(trustedDomainsHelp);
+    auto* trustedDomainsList = new QListWidget(applicationPage);
+    trustedDomainsList->setSelectionMode(QAbstractItemView::SingleSelection);
+    trustedDomainsList->setMaximumHeight(110);
+    applicationLayout->addWidget(trustedDomainsList);
+    auto* trustedDomainsActions = new QHBoxLayout;
+    auto* removeTrustedDomain = new QPushButton(QStringLiteral("Remove selected domain"), applicationPage);
+    auto* trustedDomainsStatus = new QLabel(applicationPage);
+    trustedDomainsActions->addWidget(removeTrustedDomain);
+    trustedDomainsActions->addWidget(trustedDomainsStatus, 1);
+    applicationLayout->addLayout(trustedDomainsActions);
+    const auto refreshTrustedDomains = [this, trustedDomainsList] {
+        trustedDomainsList->clear();
+        trustedDomainsList->addItems(settings_.trustedLinkDomains());
+    };
+    refreshTrustedDomains();
+    connect(removeTrustedDomain, &QPushButton::clicked, this,
+            [this, trustedDomainsList, trustedDomainsStatus, refreshTrustedDomains] {
+        const auto* selected = trustedDomainsList->currentItem();
+        if (!selected) {
+            trustedDomainsStatus->setText(QStringLiteral("Select a domain to remove."));
+            return;
+        }
+        const QString workId = workService_.startTask(QStringLiteral("Remove trusted email link domain"));
+        QStringList domains = settings_.trustedLinkDomains();
+        domains.removeAll(selected->text());
+        settings_.setTrustedLinkDomains(domains);
+        if (!settings_.sync()) {
+            workService_.failTask(workId, QStringLiteral("Could not save trusted domain changes"));
+            trustedDomainsStatus->setText(QStringLiteral("Could not save the trusted domain changes."));
+            return;
+        }
+        workService_.completeTask(workId, QStringLiteral("Trusted domain removed"));
+        refreshTrustedDomains();
+        trustedDomainsStatus->setText(QStringLiteral("Trusted domain removed."));
+    });
     applicationLayout->addStretch();
     auto* restartButton = new QPushButton(QStringLiteral("Restart deadline monitor"), applicationPage);
     applicationLayout->addWidget(restartButton, 0, Qt::AlignLeft);
@@ -154,7 +203,7 @@ SettingsWidget::SettingsWidget(services::ApplicationSettings& settings,
         QStringLiteral("Connect with your Microsoft app registration's Application (client) ID. Choose your account type below; "
                        "the app selects the matching sign-in tenant for you. In Entra, register the app for the account types "
                        "you want, add the Mobile and desktop applications platform, and enable public client flows. "
-                       "For mailbox access, add Microsoft Graph Delegated Mail.ReadWrite and Mail.Send permissions. "
+                       "For mailbox access and saved message ID migration, add Microsoft Graph Delegated User.Read, Mail.ReadWrite, and Mail.Send permissions. "
                        "This desktop app signs in as you and does not use a client secret."), outlookPage);
     outlookHelp->setWordWrap(true);
     auto* outlookConfigurationToggle = new QToolButton(outlookPage);
@@ -222,6 +271,7 @@ SettingsWidget::SettingsWidget(services::ApplicationSettings& settings,
     outlookActions->addWidget(syncMailChanges);
     outlookActions->addStretch();
     outlookLayout->addLayout(outlookActions);
+    auto authenticationTaskId = std::make_shared<QString>();
     auto* ignoredSenderToggle = new QToolButton(outlookPage);
     ignoredSenderToggle->setText(QStringLiteral("Ignored sender rules"));
     ignoredSenderToggle->setCheckable(true);
@@ -279,27 +329,119 @@ SettingsWidget::SettingsWidget(services::ApplicationSettings& settings,
                 return;
             }
         }
+        const QString workId = workService_.startTask(QStringLiteral("Add ignored sender rule"));
         QString error;
         if (!mailIndexService_.requestAllFolderRescans(error)) {
+            workService_.failTask(workId, error);
             ignoredSenderStatus->setText(error);
             return;
         }
         ignoredSenderList->addItem(sender);
         ignoredSenderInput->clear();
         persistIgnoredSenders();
+        workService_.completeTask(workId, QStringLiteral("Ignored sender rule saved; existing mail queued for reconciliation"));
         ignoredSenderStatus->setText(QStringLiteral("Ignored sender saved."));
     });
     connect(removeIgnoredSender, &QPushButton::clicked, this,
-            [ignoredSenderList, ignoredSenderStatus, persistIgnoredSenders] {
+            [this, ignoredSenderList, ignoredSenderStatus, persistIgnoredSenders] {
         const QList<QListWidgetItem*> selected = ignoredSenderList->selectedItems();
         if (selected.isEmpty()) {
             ignoredSenderStatus->setText(QStringLiteral("Select a sender to remove."));
             return;
         }
+        const QString workId = workService_.startTask(QStringLiteral("Remove ignored sender rule"));
         for (QListWidgetItem* item : selected)
             delete ignoredSenderList->takeItem(ignoredSenderList->row(item));
         persistIgnoredSenders();
+        workService_.completeTask(workId, QStringLiteral("Ignored sender rule removed"));
         ignoredSenderStatus->setText(QStringLiteral("Ignored sender removed."));
+    });
+    auto* importantSenderToggle = new QToolButton(outlookPage);
+    importantSenderToggle->setText(QStringLiteral("Important sender rules"));
+    importantSenderToggle->setCheckable(true);
+    importantSenderToggle->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    importantSenderToggle->setArrowType(Qt::RightArrow);
+    outlookLayout->addWidget(importantSenderToggle, 0, Qt::AlignLeft);
+    auto* importantSenderRules = new QWidget(outlookPage);
+    auto* importantSenderLayout = new QVBoxLayout(importantSenderRules);
+    importantSenderLayout->setContentsMargins(16, 0, 0, 0);
+    auto* importantSenderHelp = new QLabel(
+        QStringLiteral("Add exact email addresses that should be treated as important."), importantSenderRules);
+    importantSenderHelp->setWordWrap(true);
+    importantSenderLayout->addWidget(importantSenderHelp);
+    auto* importantSenderList = new QListWidget(importantSenderRules);
+    importantSenderList->setMinimumHeight(70);
+    importantSenderList->setMaximumHeight(130);
+    importantSenderList->addItems(settings_.importantSenderRules());
+    importantSenderLayout->addWidget(importantSenderList);
+    auto* importantSenderControls = new QHBoxLayout;
+    auto* importantSenderInput = new QLineEdit(importantSenderRules);
+    importantSenderInput->setPlaceholderText(QStringLiteral("sender@example.com"));
+    auto* addImportantSender = new QPushButton(QStringLiteral("Add sender"), importantSenderRules);
+    auto* removeImportantSender = new QPushButton(QStringLiteral("Remove selected"), importantSenderRules);
+    importantSenderControls->addWidget(importantSenderInput, 1);
+    importantSenderControls->addWidget(addImportantSender);
+    importantSenderControls->addWidget(removeImportantSender);
+    importantSenderLayout->addLayout(importantSenderControls);
+    auto* importantSenderStatus = new QLabel(importantSenderRules);
+    importantSenderLayout->addWidget(importantSenderStatus);
+    importantSenderRules->setVisible(false);
+    outlookLayout->addWidget(importantSenderRules);
+    connect(importantSenderToggle, &QToolButton::toggled, this,
+            [importantSenderToggle, importantSenderRules](bool expanded) {
+        importantSenderRules->setVisible(expanded);
+        importantSenderToggle->setArrowType(expanded ? Qt::DownArrow : Qt::RightArrow);
+    });
+    const auto persistImportantSenders = [this, importantSenderList] {
+        QStringList senders;
+        for (int i = 0; i < importantSenderList->count(); ++i)
+            senders.append(importantSenderList->item(i)->text());
+        settings_.setImportantSenderRules(senders);
+        return settings_.sync();
+    };
+    connect(addImportantSender, &QPushButton::clicked, this,
+            [this, importantSenderInput, importantSenderList, importantSenderStatus, persistImportantSenders] {
+        const QString sender = importantSenderInput->text().trimmed();
+        static const QRegularExpression addressPattern(QStringLiteral("^[^\\s<>@]+@[^\\s<>@]+$"));
+        if (!addressPattern.match(sender).hasMatch()) {
+            importantSenderStatus->setText(QStringLiteral("Enter a full email address, such as sender@example.com."));
+            return;
+        }
+        for (int i = 0; i < importantSenderList->count(); ++i) {
+            if (importantSenderList->item(i)->text().compare(sender, Qt::CaseInsensitive) == 0) {
+                importantSenderStatus->setText(QStringLiteral("That sender is already on the list."));
+                return;
+            }
+        }
+        const QString workId = workService_.startTask(QStringLiteral("Add important sender rule"));
+        importantSenderList->addItem(sender);
+        if (!persistImportantSenders()) {
+            delete importantSenderList->takeItem(importantSenderList->count() - 1);
+            workService_.failTask(workId, QStringLiteral("Could not save important sender rule"));
+            importantSenderStatus->setText(QStringLiteral("Could not save the sender rule."));
+            return;
+        }
+        importantSenderInput->clear();
+        workService_.completeTask(workId, QStringLiteral("Important sender rule saved"));
+        importantSenderStatus->setText(QStringLiteral("Important sender saved."));
+    });
+    connect(removeImportantSender, &QPushButton::clicked, this,
+            [this, importantSenderList, importantSenderStatus, persistImportantSenders] {
+        const QList<QListWidgetItem*> selected = importantSenderList->selectedItems();
+        if (selected.isEmpty()) {
+            importantSenderStatus->setText(QStringLiteral("Select a sender to remove."));
+            return;
+        }
+        const QString workId = workService_.startTask(QStringLiteral("Remove important sender rule"));
+        for (QListWidgetItem* item : selected)
+            delete importantSenderList->takeItem(importantSenderList->row(item));
+        if (!persistImportantSenders()) {
+            workService_.failTask(workId, QStringLiteral("Could not save important sender changes"));
+            importantSenderStatus->setText(QStringLiteral("Could not save the sender changes."));
+            return;
+        }
+        workService_.completeTask(workId, QStringLiteral("Important sender rule removed"));
+        importantSenderStatus->setText(QStringLiteral("Important sender removed."));
     });
     auto* ignoredFolderToggle = new QToolButton(outlookPage);
     ignoredFolderToggle->setText(QStringLiteral("Ignored folder rules"));
@@ -368,26 +510,31 @@ SettingsWidget::SettingsWidget(services::ApplicationSettings& settings,
                 return;
             }
         }
+        const QString workId = workService_.startTask(QStringLiteral("Add ignored folder rule"));
         QString error;
         if (!mailIndexService_.requestFolderRescan(folderId, error)) {
+            workService_.failTask(workId, error);
             ignoredFolderStatus->setText(error);
             return;
         }
         auto* item = new QListWidgetItem(ignoredFolderCombo->currentText(), ignoredFolderList);
         item->setData(Qt::UserRole, folderId);
         persistIgnoredFolders();
+        workService_.completeTask(workId, QStringLiteral("Folder rule saved; existing unread mail queued for processing"));
         ignoredFolderStatus->setText(QStringLiteral("Ignored folder saved. Existing unread messages are queued for the next sync."));
     });
     connect(removeIgnoredFolder, &QPushButton::clicked, this,
-            [ignoredFolderList, ignoredFolderStatus, persistIgnoredFolders] {
+            [this, ignoredFolderList, ignoredFolderStatus, persistIgnoredFolders] {
         const QList<QListWidgetItem*> selected = ignoredFolderList->selectedItems();
         if (selected.isEmpty()) {
             ignoredFolderStatus->setText(QStringLiteral("Select a folder rule to remove."));
             return;
         }
+        const QString workId = workService_.startTask(QStringLiteral("Remove ignored folder rule"));
         for (QListWidgetItem* item : selected)
             delete ignoredFolderList->takeItem(ignoredFolderList->row(item));
         persistIgnoredFolders();
+        workService_.completeTask(workId, QStringLiteral("Ignored folder rule removed"));
         ignoredFolderStatus->setText(QStringLiteral("Ignored folder removed."));
     });
     const auto folderBrowser = std::make_shared<FolderBrowserState>();
@@ -409,6 +556,7 @@ SettingsWidget::SettingsWidget(services::ApplicationSettings& settings,
     outlookStatus_ = new QLabel(QStringLiteral("Authentication is not connected yet."), outlookPage);
     outlookStatus_->setWordWrap(true);
     outlookLayout->addWidget(outlookStatus_);
+    outlookLayout->addStretch(1);
     serviceTabs->addTab(outlookPage, QStringLiteral("Outlook"));
 
     layout->addWidget(serviceTabs, 1);
@@ -416,10 +564,14 @@ SettingsWidget::SettingsWidget(services::ApplicationSettings& settings,
     layout->addWidget(restoreButton, 0, Qt::AlignLeft);
 
     connect(startMinimized_, &QCheckBox::toggled, this, [this](bool enabled) {
+        const QString workId = workService_.startTask(QStringLiteral("Change startup window preference"));
         settings_.setStartMinimized(enabled);
+        workService_.completeTask(workId, QStringLiteral("Startup window preference saved"));
     });
     connect(startOnLogin_, &QCheckBox::toggled, this, [this](bool enabled) {
+        const QString workId = workService_.startTask(QStringLiteral("Update login startup setting"));
         if (startOnLoginChanged_ && !startOnLoginChanged_(enabled)) {
+            workService_.failTask(workId, QStringLiteral("Could not update the login startup entry"));
             const QSignalBlocker blocker(startOnLogin_);
             startOnLogin_->setChecked(!enabled);
             QMessageBox::warning(this, QStringLiteral("Startup setting not changed"),
@@ -427,18 +579,24 @@ SettingsWidget::SettingsWidget(services::ApplicationSettings& settings,
             return;
         }
         settings_.setStartOnLogin(enabled);
+        workService_.completeTask(workId, QStringLiteral("Login startup preference saved"));
     });
     connect(closeToTray_, &QCheckBox::toggled, this, [this, closeToTrayChanged](bool enabled) {
+        const QString workId = workService_.startTask(QStringLiteral("Change close-to-tray preference"));
         settings_.setCloseToTray(enabled);
         if (closeToTrayChanged)
             closeToTrayChanged(enabled);
+        workService_.completeTask(workId, QStringLiteral("Close-to-tray preference saved"));
     });
     connect(restartButton, &QPushButton::clicked, this, [this, restartStatus] {
+        const QString workId = workService_.startTask(QStringLiteral("Restart deadline monitor"));
         if (!restartServices_) {
+            workService_.failTask(workId, QStringLiteral("No restartable background service is available"));
             restartStatus->setText(QStringLiteral("No restartable background service is available."));
             return;
         }
         restartServices_();
+        workService_.completeTask(workId, QStringLiteral("Deadline monitor restarted"));
         restartStatus->setText(QStringLiteral("Deadline monitor restarted."));
     });
     connect(restoreButton, &QPushButton::clicked, this, [this] { restoreDefaults(); });
@@ -448,10 +606,12 @@ SettingsWidget::SettingsWidget(services::ApplicationSettings& settings,
             timerStatus_->setText(QStringLiteral("Enter a duration greater than zero."));
             return;
         }
+        const QString workId = workService_.startTask(QStringLiteral("Save countdown timer default"));
         settings_.setDefaultCountdownSeconds(seconds);
         if (defaultCountdownChanged_)
             defaultCountdownChanged_(seconds);
         timerStatus_->setText(QStringLiteral("Default duration saved."));
+        workService_.completeTask(workId, QStringLiteral("Countdown default saved"));
     });
     connect(saveOutlook, &QPushButton::clicked, this, [this] {
         const QString accountType = outlookAccountTypeInput_->currentData().toString();
@@ -467,10 +627,12 @@ SettingsWidget::SettingsWidget(services::ApplicationSettings& settings,
             outlookStatus_->setText(QStringLiteral("Paste the Application (client) ID from your app registration's Overview page. Do not use the Object ID."));
             return;
         }
+        const QString workId = workService_.startTask(QStringLiteral("Save Outlook configuration"));
         settings_.setOutlookConfiguration(tenant, clientId);
+        workService_.completeTask(workId, QStringLiteral("Outlook configuration saved"));
         outlookStatus_->setText(QStringLiteral("Outlook configuration saved. Sign-in is not connected yet."));
     });
-    connect(connectOutlook, &QPushButton::clicked, this, [this, outlookConfigurationToggle] {
+    connect(connectOutlook, &QPushButton::clicked, this, [this, outlookConfigurationToggle, authenticationTaskId] {
         const QString accountType = outlookAccountTypeInput_->currentData().toString();
         const QString tenant = accountType == QLatin1String("custom")
             ? outlookTenantInput_->text().trimmed() : accountType;
@@ -486,9 +648,15 @@ SettingsWidget::SettingsWidget(services::ApplicationSettings& settings,
             return;
         }
         settings_.setOutlookConfiguration(tenant, clientId);
+        if (!authenticationTaskId->isEmpty())
+            workService_.failTask(*authenticationTaskId, QStringLiteral("A new Outlook sign-in was started."));
+        *authenticationTaskId = workService_.startTask(QStringLiteral("Sign in to Outlook"));
+        workService_.updateTask(*authenticationTaskId, QStringLiteral("Waiting for Microsoft sign-in…"));
         outlookAuthService_.connectAccount(tenant, clientId);
     });
-    connect(disconnectOutlook, &QPushButton::clicked, this, [this] {
+    connect(disconnectOutlook, &QPushButton::clicked, this, [this, authenticationTaskId] {
+        if (authenticationTaskId->isEmpty())
+            *authenticationTaskId = workService_.startTask(QStringLiteral("Disconnect Outlook"));
         outlookAuthService_.disconnectAccount();
     });
     auto mailboxAccessRequestId = std::make_shared<quint64>(0);
@@ -498,31 +666,34 @@ SettingsWidget::SettingsWidget(services::ApplicationSettings& settings,
         int indexedCount = 0;
         bool running = false;
         bool manual = false;
+        QString workTaskId;
     };
     auto initialScan = std::make_shared<InitialInboxScanState>();
     auto* mailboxPollTimer = new QTimer(this);
     mailboxPollTimer->setInterval(5 * 60 * 1000);
     connect(mailboxPollTimer, &QTimer::timeout, this, [this, initialScan] {
-        if (!initialScan->running && !mailDeltaSync_->isRunning())
-            mailDeltaSync_->start();
+        if (!initialScan->running && !mailDeltaSync_.isRunning())
+            mailDeltaSync_.start();
     });
     const auto beginMailboxScan = [this, initialScan](bool manual) {
-        if (initialScan->running || mailDeltaSync_->isRunning())
+        if (initialScan->running || mailDeltaSync_.isRunning())
             return;
         if (!manual && mailIndexService_.initialMailboxScanComplete())
             return;
         initialScan->running = true;
         initialScan->manual = manual;
         initialScan->indexedCount = 0;
+        initialScan->workTaskId = workService_.startTask(
+            manual ? QStringLiteral("Scan all Outlook mail") : QStringLiteral("Initial Outlook mail scan"));
         outlookStatus_->setText(manual ? QStringLiteral("Starting a full mailbox scan…")
                                       : QStringLiteral("Starting the initial mailbox scan…"));
-        initialScan->requestId = graphClient_.listMessages(100);
+        initialScan->requestId = graphClient_.listMessages(100, initialScan->workTaskId);
     };
     auto startInitialScan = std::make_shared<std::function<void()>>();
     *startInitialScan = [this, beginMailboxScan, mailboxPollTimer] {
         if (mailIndexService_.initialMailboxScanComplete()) {
             mailboxPollTimer->start();
-            mailDeltaSync_->start();
+            mailDeltaSync_.start();
         } else {
             beginMailboxScan(false);
         }
@@ -536,31 +707,35 @@ SettingsWidget::SettingsWidget(services::ApplicationSettings& settings,
         *inboxIndexRequestId = graphClient_.listMessages(100);
     });
     connect(scanAllMail, &QPushButton::clicked, this, [this, beginMailboxScan, initialScan] {
-        if (initialScan->running || mailDeltaSync_->isRunning()) {
+        if (initialScan->running || mailDeltaSync_.isRunning()) {
             outlookStatus_->setText(QStringLiteral("A mailbox scan is already running."));
             return;
         }
         beginMailboxScan(true);
     });
     connect(syncMailChanges, &QPushButton::clicked, this, [this, initialScan] {
-        if (initialScan->running || mailDeltaSync_->isRunning()) {
+        if (initialScan->running || mailDeltaSync_.isRunning()) {
             outlookStatus_->setText(QStringLiteral("A mailbox scan is already running."));
             return;
         }
-        mailDeltaSync_->start();
+        mailDeltaSync_.start();
     });
-    connect(mailDeltaSync_, &services::MailDeltaSyncService::progressChanged,
+    connect(&mailDeltaSync_, &services::MailDeltaSyncService::progressChanged,
             outlookStatus_, &QLabel::setText);
-    connect(mailDeltaSync_, &services::MailDeltaSyncService::finished, this,
-            [this](int changed, int removed) {
+    connect(&mailDeltaSync_, &services::MailDeltaSyncService::finished, this,
+            [this](int changed, int removed, int untranslatableIds) {
         const int total = mailIndexService_.indexedMessageCount();
-        outlookStatus_->setText(QStringLiteral("Mail changes synchronized. Updated %1 message(s), removed %2, and %3 message(s) are in the local index.")
+        const QString skipped = untranslatableIds > 0
+            ? QStringLiteral(" Microsoft could not translate %1 obsolete saved ID(s); those stale local entries were removed.").arg(untranslatableIds)
+            : QString();
+        outlookStatus_->setText(QStringLiteral("Mail changes synchronized. Updated %1 message(s), removed %2, and %3 message(s) are in the local index.%4")
                                 .arg(changed).arg(removed)
-                                .arg(total < 0 ? QStringLiteral("an unknown number of") : QString::number(total)));
+                                .arg(total < 0 ? QStringLiteral("an unknown number of") : QString::number(total))
+                                .arg(skipped));
     });
-    connect(mailDeltaSync_, &services::MailDeltaSyncService::failed,
+    connect(&mailDeltaSync_, &services::MailDeltaSyncService::failed,
             outlookStatus_, &QLabel::setText);
-    connect(mailDeltaSync_, &services::MailDeltaSyncService::newMessagesReceived,
+    connect(&mailDeltaSync_, &services::MailDeltaSyncService::newMessagesReceived,
             this, [this](const QJsonArray& messages) {
         if (messages.isEmpty() || !notify_)
             return;
@@ -639,15 +814,19 @@ SettingsWidget::SettingsWidget(services::ApplicationSettings& settings,
                                                          : QStringLiteral("initial mailbox scan");
             if (httpStatus != 200) {
                 initialScan->running = false;
-                outlookStatus_->setText(QStringLiteral("The %1 could not continue (HTTP %2). Check mailbox access, then retry the scan.")
-                                        .arg(scanKind).arg(httpStatus));
+                const QString error = QStringLiteral("The %1 could not continue (HTTP %2). Check mailbox access, then retry the scan.")
+                                          .arg(scanKind).arg(httpStatus);
+                workService_.failTask(initialScan->workTaskId, error);
+                outlookStatus_->setText(error);
                 return;
             }
             const QJsonDocument document = QJsonDocument::fromJson(body);
             const QJsonObject response = document.object();
             if (!document.isObject() || !response.value(QStringLiteral("value")).isArray()) {
                 initialScan->running = false;
-                outlookStatus_->setText(QStringLiteral("Microsoft returned an unreadable mailbox page. The scan was not marked complete."));
+                const QString error = QStringLiteral("Microsoft returned an unreadable mailbox page. The scan was not marked complete.");
+                workService_.failTask(initialScan->workTaskId, error);
+                outlookStatus_->setText(error);
                 return;
             }
             const QJsonArray messages = response.value(QStringLiteral("value")).toArray();
@@ -655,6 +834,7 @@ SettingsWidget::SettingsWidget(services::ApplicationSettings& settings,
             const int indexed = mailIndexService_.indexMessages(messages, indexError);
             if (indexed < 0) {
                 initialScan->running = false;
+                workService_.failTask(initialScan->workTaskId, indexError);
                 outlookStatus_->setText(indexError);
                 return;
             }
@@ -665,23 +845,29 @@ SettingsWidget::SettingsWidget(services::ApplicationSettings& settings,
                                         .arg(initialScan->manual ? QStringLiteral("Full mailbox scan")
                                                                  : QStringLiteral("Initial mailbox scan"))
                                         .arg(initialScan->indexedCount));
-                initialScan->requestId = graphClient_.listMailboxMessagesPage(nextLink);
+                const QString detail = QStringLiteral("Indexed %1 messages; retrieving the next page…")
+                                           .arg(initialScan->indexedCount);
+                workService_.updateTask(initialScan->workTaskId, detail);
+                initialScan->requestId = graphClient_.listMailboxMessagesPage(nextLink, initialScan->workTaskId);
                 return;
             }
             QString stateError;
             if (!mailIndexService_.markInitialMailboxScanComplete(stateError)) {
                 initialScan->running = false;
+                workService_.failTask(initialScan->workTaskId, stateError);
                 outlookStatus_->setText(stateError);
                 return;
             }
             initialScan->running = false;
+            workService_.completeTask(initialScan->workTaskId,
+                                      QStringLiteral("Mailbox scan complete; indexed %1 messages").arg(initialScan->indexedCount));
             const int total = mailIndexService_.indexedMessageCount();
             outlookStatus_->setText(QStringLiteral("Mailbox scan complete. Indexed %1 message(s); %2 message(s) are now in the local index.")
                                     .arg(initialScan->indexedCount)
                                     .arg(total < 0 ? QStringLiteral("total unavailable") : QString::number(total)));
             if (!initialScan->manual) {
                 mailboxPollTimer->start();
-                mailDeltaSync_->start();
+                mailDeltaSync_.start();
             }
             return;
         }
@@ -737,16 +923,37 @@ SettingsWidget::SettingsWidget(services::ApplicationSettings& settings,
             outlookStatus_->setText(error);
         else if (initialScan->running && requestId == initialScan->requestId) {
             initialScan->running = false;
-            outlookStatus_->setText(QStringLiteral("The %1 stopped: %2%3")
-                                    .arg(initialScan->manual ? QStringLiteral("mailbox scan")
-                                                             : QStringLiteral("initial mailbox scan"),
-                                         error,
-                                         initialScan->manual ? QString() : QStringLiteral(" It will retry next time Outlook connects.")));
+            const QString message = QStringLiteral("The %1 stopped: %2%3")
+                                        .arg(initialScan->manual ? QStringLiteral("mailbox scan")
+                                                                 : QStringLiteral("initial mailbox scan"),
+                                             error,
+                                             initialScan->manual ? QString() : QStringLiteral(" It will retry next time Outlook connects."));
+            workService_.failTask(initialScan->workTaskId, message);
+            outlookStatus_->setText(message);
         }
     });
     connect(&outlookAuthService_, &services::OutlookAuthService::statusChanged,
-            this, [this, startInitialScan, mailboxPollTimer](const QString& status) {
+            this, [this, startInitialScan, mailboxPollTimer, authenticationTaskId](const QString& status) {
         outlookStatus_->setText(status);
+        if (!authenticationTaskId->isEmpty()) {
+            const QString normalized = status.toCaseFolded();
+            if (status.startsWith(QStringLiteral("Outlook account connected.")) ||
+                status.startsWith(QStringLiteral("Outlook credentials removed"))) {
+                workService_.completeTask(*authenticationTaskId, status);
+                authenticationTaskId->clear();
+            } else if (normalized.contains(QStringLiteral("failed")) ||
+                       normalized.contains(QStringLiteral("declined")) ||
+                       normalized.contains(QStringLiteral("expired")) ||
+                       normalized.contains(QStringLiteral("unavailable")) ||
+                       normalized.startsWith(QStringLiteral("could not")) ||
+                       normalized.startsWith(QStringLiteral("microsoft rejected")) ||
+                       normalized.startsWith(QStringLiteral("microsoft returned"))) {
+                workService_.failTask(*authenticationTaskId, status);
+                authenticationTaskId->clear();
+            } else {
+                workService_.updateTask(*authenticationTaskId, status);
+            }
+        }
         if (status.startsWith(QStringLiteral("Outlook account connected.")) ||
             status.startsWith(QStringLiteral("Outlook sign-in is saved.")))
             (*startInitialScan)();
@@ -785,7 +992,9 @@ void SettingsWidget::restoreDefaults()
             QStringLiteral("Restore the default application behavior settings?"),
             QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Yes)
         return;
+    const QString workId = workService_.startTask(QStringLiteral("Restore application defaults"));
     if (startOnLoginChanged_ && !startOnLoginChanged_(true)) {
+        workService_.failTask(workId, QStringLiteral("Could not enable the login startup entry"));
         QMessageBox::warning(this, QStringLiteral("Could not restore defaults"),
                              QStringLiteral("The login startup entry could not be enabled."));
         return;
@@ -816,6 +1025,7 @@ void SettingsWidget::restoreDefaults()
     if (defaultCountdownChanged_)
         defaultCountdownChanged_(seconds);
     timerStatus_->setText(QStringLiteral("Default settings restored."));
+    workService_.completeTask(workId, QStringLiteral("Application defaults restored"));
 }
 
 } // namespace productivity::ui

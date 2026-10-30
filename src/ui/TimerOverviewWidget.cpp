@@ -1,6 +1,7 @@
 #include "TimerOverviewWidget.h"
 
 #include "TimerService.h"
+#include "WorkDescriptorService.h"
 
 #include <QDateTime>
 #include <QHeaderView>
@@ -56,9 +57,12 @@ QTableWidgetItem* readOnlyItem(const QString& text)
 
 } // namespace
 
-TimerOverviewWidget::TimerOverviewWidget(services::TimerService& timerService, QWidget* parent)
+TimerOverviewWidget::TimerOverviewWidget(services::TimerService& timerService,
+                                         services::WorkDescriptorService& workService,
+                                         QWidget* parent)
     : QWidget(parent)
     , timerService_(timerService)
+    , workService_(workService)
 {
     auto* rootLayout = new QVBoxLayout(this);
     auto* createLayout = new QHBoxLayout;
@@ -145,12 +149,16 @@ void TimerOverviewWidget::addCountdown()
         title = QStringLiteral("Countdown timer");
 
     const QDateTime deadline = QDateTime::currentDateTimeUtc().addSecs(durationSeconds);
+    const QString workId = workService_.startTask(QStringLiteral("Create countdown timer"));
+    workService_.updateTask(workId, QStringLiteral("Saving timer…"));
     const QString eventId = timerService_.schedule(
         title, deadline, services::NotificationPolicy::Deadline);
     if (eventId.isEmpty()) {
+        workService_.failTask(workId, QStringLiteral("Could not save the timer"));
         showStatus(QStringLiteral("Could not save the timer. See the application log for details."));
         return;
     }
+    workService_.completeTask(workId, QStringLiteral("Timer started"));
 
     titleInput_->clear();
     setDefaultDuration(defaultDurationSeconds_);
@@ -175,9 +183,14 @@ void TimerOverviewWidget::cancelSelected()
         showStatus(QStringLiteral("Select a timer first."));
         return;
     }
-    showStatus(timerService_.cancel(eventId)
-        ? QStringLiteral("Timer cancelled.")
-        : QStringLiteral("Could not cancel the selected timer."));
+    const QString workId = workService_.startTask(QStringLiteral("Cancel countdown timer"));
+    const bool success = timerService_.cancel(eventId);
+    if (success)
+        workService_.completeTask(workId, QStringLiteral("Timer cancelled"));
+    else
+        workService_.failTask(workId, QStringLiteral("Could not cancel the timer"));
+    showStatus(success ? QStringLiteral("Timer cancelled.")
+                       : QStringLiteral("Could not cancel the selected timer."));
     refreshTimers();
 }
 
@@ -188,9 +201,14 @@ void TimerOverviewWidget::completeSelected()
         showStatus(QStringLiteral("Select a timer first."));
         return;
     }
-    showStatus(timerService_.complete(eventId)
-        ? QStringLiteral("Timer marked complete.")
-        : QStringLiteral("Could not complete the selected timer."));
+    const QString workId = workService_.startTask(QStringLiteral("Complete countdown timer"));
+    const bool success = timerService_.complete(eventId);
+    if (success)
+        workService_.completeTask(workId, QStringLiteral("Timer marked complete"));
+    else
+        workService_.failTask(workId, QStringLiteral("Could not complete the timer"));
+    showStatus(success ? QStringLiteral("Timer marked complete.")
+                       : QStringLiteral("Could not complete the selected timer."));
     refreshTimers();
 }
 
@@ -208,7 +226,13 @@ void TimerOverviewWidget::togglePauseSelected()
             break;
         }
     }
+    const QString workId = workService_.startTask(wasPaused ? QStringLiteral("Resume countdown timer")
+                                                            : QStringLiteral("Pause countdown timer"));
     const bool success = wasPaused ? timerService_.resume(eventId) : timerService_.pause(eventId);
+    if (success)
+        workService_.completeTask(workId, wasPaused ? QStringLiteral("Timer resumed") : QStringLiteral("Timer paused"));
+    else
+        workService_.failTask(workId, QStringLiteral("Could not change the timer state"));
     showStatus(success
         ? (wasPaused ? QStringLiteral("Timer resumed.") : QStringLiteral("Timer paused."))
         : QStringLiteral("Could not change the selected timer."));

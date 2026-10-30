@@ -22,6 +22,7 @@ set(QT_DEPLOY_PLUGINS_DIR "${CMAKE_INSTALL_LIBDIR}/plugins")
 
 find_package(Qt6 6.12 REQUIRED COMPONENTS Widgets Sql DBus Network)
 find_package(Qt6 6.12 QUIET COMPONENTS Svg)
+find_package(LibXml2 REQUIRED)
 
 # Keep the dependency direction explicit as the application grows:
 # domain <- infrastructure <- services <- UI <- app entry point.
@@ -38,6 +39,8 @@ target_include_directories(productivity_infrastructure INTERFACE
 
 add_library(productivity_services STATIC
     src/services/DeadlineMonitor.cpp
+    src/services/ImportantSenderTodoService.cpp
+    src/services/ImportantSenderTodoService.h
     src/services/ApplicationSettings.cpp
     src/services/AutostartService.cpp
     src/services/MailIndexService.cpp
@@ -51,6 +54,8 @@ add_library(productivity_services STATIC
     src/services/OutlookAuthService.h
     src/services/TodoService.cpp
     src/services/TimerService.cpp
+    src/services/WorkDescriptorService.cpp
+    src/services/WorkDescriptorService.h
 )
 target_link_libraries(productivity_services PUBLIC productivity_infrastructure Qt6::Sql Qt6::DBus Qt6::Network)
 target_include_directories(productivity_services PUBLIC
@@ -63,8 +68,10 @@ add_library(productivity_ui STATIC
     src/ui/SettingsWidget.cpp
     src/ui/TodoOverviewWidget.cpp
     src/ui/TimerOverviewWidget.cpp
+    src/ui/MailListWidget.cpp
+    src/ui/WorkActivityWidget.cpp
 )
-target_link_libraries(productivity_ui PUBLIC productivity_services Qt6::Widgets)
+target_link_libraries(productivity_ui PUBLIC productivity_services Qt6::Widgets LibXml2::LibXml2)
 target_include_directories(productivity_ui PUBLIC
     "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/ui>"
 )

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QByteArray>
+#include <QHash>
 #include <QObject>
 #include <QStringList>
 
@@ -11,25 +12,29 @@ namespace productivity::services {
 
 class ApplicationSettings;
 class OutlookAuthService;
+class WorkDescriptorService;
 
 class MicrosoftGraphClient final : public QObject
 {
     Q_OBJECT
 public:
     MicrosoftGraphClient(ApplicationSettings& settings, OutlookAuthService& authService,
+                         WorkDescriptorService& workService,
                          QObject* parent = nullptr);
 
     quint64 request(const QByteArray& method, const QString& relativePath,
-                    const QByteArray& jsonBody = {});
-    quint64 listMessages(int pageSize = 25);
-    quint64 listMailboxMessagesPage(const QString& nextLink);
-    quint64 listRootMailFolders();
-    quint64 listChildMailFolders(const QString& folderId);
-    quint64 listMailFoldersPage(const QString& nextLink);
-    quint64 listFolderMessageDelta(const QString& folderId, const QString& deltaLink = {});
-    quint64 listFolderMessageDeltaPage(const QString& nextLink);
-    quint64 translateMessageIds(const QStringList& ids);
-    quint64 setMessageRead(const QString& messageId, bool isRead);
+                    const QByteArray& jsonBody = {}, const QString& parentWorkId = {});
+    quint64 listMessages(int pageSize = 25, const QString& parentWorkId = {});
+    quint64 getMessage(const QString& messageId, const QString& parentWorkId = {});
+    quint64 listMailboxMessagesPage(const QString& nextLink, const QString& parentWorkId = {});
+    quint64 listRootMailFolders(const QString& parentWorkId = {});
+    quint64 listChildMailFolders(const QString& folderId, const QString& parentWorkId = {});
+    quint64 listMailFoldersPage(const QString& nextLink, const QString& parentWorkId = {});
+    quint64 listFolderMessageDelta(const QString& folderId, const QString& deltaLink = {},
+                                  const QString& parentWorkId = {});
+    quint64 listFolderMessageDeltaPage(const QString& nextLink, const QString& parentWorkId = {});
+    quint64 translateMessageIds(const QStringList& ids, const QString& parentWorkId = {});
+    quint64 setMessageRead(const QString& messageId, bool isRead, const QString& parentWorkId = {});
     quint64 sendMail(const QString& recipient, const QString& subject, const QString& body);
 
 signals:
@@ -38,6 +43,7 @@ signals:
     void requestRetrying(quint64 requestId, int attempt, int delayMs, const QString& reason);
 
 private:
+    void trackRequest(quint64 requestId, const QString& title, const QString& parentWorkId = {});
     void sendRequest(quint64 requestId, const QByteArray& method, const QUrl& url,
                      const QByteArray& jsonBody, int retryAttempt = 0,
                      bool forceRefreshToken = false, bool refreshAlreadyAttempted = false);
@@ -45,6 +51,8 @@ private:
     ApplicationSettings& settings_;
     OutlookAuthService& authService_;
     QNetworkAccessManager* network_ = nullptr;
+    WorkDescriptorService& workService_;
+    QHash<quint64, QString> workTaskIds_;
     quint64 nextRequestId_ = 1;
 };
 

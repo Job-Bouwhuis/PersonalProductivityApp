@@ -1,6 +1,7 @@
 #include "NotesWidget.h"
 
 #include "NotesService.h"
+#include "WorkDescriptorService.h"
 
 #include <QDateTime>
 #include <QHBoxLayout>
@@ -95,9 +96,12 @@ QString quickNotePreview(const QString& content)
 
 } // namespace
 
-NotesWidget::NotesWidget(services::NotesService& notesService, QWidget* parent)
+NotesWidget::NotesWidget(services::NotesService& notesService,
+                         services::WorkDescriptorService& workService,
+                         QWidget* parent)
     : QWidget(parent)
     , notesService_(notesService)
+    , workService_(workService)
 {
     auto* rootLayout = new QVBoxLayout(this);
     tabs_ = new QTabWidget(this);
@@ -204,11 +208,15 @@ void NotesWidget::openQuickNote(const QString& id)
 void NotesWidget::createPersistentNote()
 {
     savePersistentNote();
-    const QString id = notesService_.savePersistentNote({}, QStringLiteral("Untitled note"), {});
+    const QString workId = workService_.startTask(QStringLiteral("Create persistent note"));
+    const QString id = notesService_.savePersistentNote(
+        {}, QStringLiteral("Untitled note"), QStringLiteral(""));
     if (id.isEmpty()) {
+        workService_.failTask(workId, QStringLiteral("Could not create the note"));
         showPersistentStatus(QStringLiteral("Could not create the note. See the application log."));
         return;
     }
+    workService_.completeTask(workId, QStringLiteral("Persistent note created"));
     searchInput_->clear();
     populatePersistentList(id);
     titleInput_->setFocus();
@@ -228,10 +236,13 @@ void NotesWidget::deletePersistentNote()
         return;
 
     autosaveTimer_->stop();
+    const QString workId = workService_.startTask(QStringLiteral("Delete persistent note"));
     if (!notesService_.deletePersistentNote(currentPersistentId_)) {
+        workService_.failTask(workId, QStringLiteral("Could not delete the note"));
         showPersistentStatus(QStringLiteral("Could not delete the note; a TODO may link to it."));
         return;
     }
+    workService_.completeTask(workId, QStringLiteral("Persistent note deleted"));
     currentPersistentId_.clear();
     persistentDirty_ = false;
     populatePersistentList();
@@ -243,12 +254,15 @@ void NotesWidget::savePersistentNote()
     if (currentPersistentId_.isEmpty() || loadingPersistentNote_ || !persistentDirty_)
         return;
     autosaveTimer_->stop();
+    const QString workId = workService_.startTask(QStringLiteral("Save persistent note"));
     const QString savedId = notesService_.savePersistentNote(
         currentPersistentId_, titleInput_->text(), markdownInput_->toPlainText());
     if (savedId.isEmpty()) {
+        workService_.failTask(workId, QStringLiteral("Could not save the note"));
         showPersistentStatus(QStringLiteral("Could not save the note. See the application log."));
         return;
     }
+    workService_.completeTask(workId, QStringLiteral("Persistent note saved"));
     persistentDirty_ = false;
     showPersistentStatus(QStringLiteral("Saved automatically."));
     for (int row = 0; row < persistentList_->count(); ++row) {
@@ -323,11 +337,18 @@ void NotesWidget::loadSelectedPersistentNote()
 
 void NotesWidget::captureQuickNote()
 {
-    const QString id = notesService_.captureQuickNote(quickInput_->toPlainText());
-    if (id.isEmpty()) {
+    if (quickInput_->toPlainText().trimmed().isEmpty()) {
         quickPreview_->setText(QStringLiteral("Enter a quick note before capturing it."));
         return;
     }
+    const QString workId = workService_.startTask(QStringLiteral("Capture quick note"));
+    const QString id = notesService_.captureQuickNote(quickInput_->toPlainText());
+    if (id.isEmpty()) {
+        workService_.failTask(workId, QStringLiteral("Could not capture quick note"));
+        quickPreview_->setText(QStringLiteral("Enter a quick note before capturing it."));
+        return;
+    }
+    workService_.completeTask(workId, QStringLiteral("Quick note captured"));
     quickInput_->clear();
     refreshQuickNotes();
     for (int row = 0; row < quickList_->count(); ++row) {
@@ -370,10 +391,13 @@ void NotesWidget::dismissSelectedQuickNote()
         return;
     }
     const QString id = item->data(Qt::UserRole).toString();
+    const QString workId = workService_.startTask(QStringLiteral("Dismiss quick note"));
     if (!notesService_.dismissQuickNote(id)) {
+        workService_.failTask(workId, QStringLiteral("Could not dismiss quick note"));
         quickPreview_->setText(QStringLiteral("Could not dismiss this quick note; a TODO may link to it."));
         return;
     }
+    workService_.completeTask(workId, QStringLiteral("Quick note dismissed"));
     refreshQuickNotes();
 }
 

@@ -186,6 +186,52 @@ int MailIndexService::indexedMessageCount() const
     return query.value(0).toInt();
 }
 
+QVector<IndexedMailSummary> MailIndexService::unreadMessages() const
+{
+    QVector<IndexedMailSummary> messages;
+    QSqlQuery query(database_);
+    if (!query.exec(QStringLiteral(
+            "SELECT message_id, subject, sender_name, sender_address, received_at_utc "
+            "FROM outlook_message_index WHERE is_read = 0 "
+            "ORDER BY received_at_utc DESC, message_id ASC"))) {
+        qCWarning(mailIndexLog) << "Could not load unread messages from the local index:" << query.lastError().text();
+        return messages;
+    }
+    while (query.next()) {
+        IndexedMailSummary message;
+        message.messageId = query.value(0).toString();
+        message.subject = query.value(1).toString();
+        message.senderName = query.value(2).toString();
+        message.senderAddress = query.value(3).toString();
+        message.receivedAtUtc = query.value(4).toString();
+        messages.append(std::move(message));
+    }
+    return messages;
+}
+
+QVector<IndexedMailSummary> MailIndexService::allMessages() const
+{
+    QVector<IndexedMailSummary> messages;
+    QSqlQuery query(database_);
+    if (!query.exec(QStringLiteral(
+            "SELECT message_id, subject, sender_name, sender_address, received_at_utc "
+            "FROM outlook_message_index "
+            "ORDER BY received_at_utc DESC, message_id ASC"))) {
+        qCWarning(mailIndexLog) << "Could not load messages from the local index:" << query.lastError().text();
+        return messages;
+    }
+    while (query.next()) {
+        IndexedMailSummary message;
+        message.messageId = query.value(0).toString();
+        message.subject = query.value(1).toString();
+        message.senderName = query.value(2).toString();
+        message.senderAddress = query.value(3).toString();
+        message.receivedAtUtc = query.value(4).toString();
+        messages.append(std::move(message));
+    }
+    return messages;
+}
+
 bool MailIndexService::initialMailboxScanComplete() const
 {
     QSqlQuery query(database_);
@@ -362,9 +408,10 @@ QStringList MailIndexService::legacyMessageIds(int limit) const
     return ids;
 }
 
-bool MailIndexService::migrateMessageIds(const QHash<QString, QString>& translatedIds, QString& error)
+bool MailIndexService::migrateMessageIds(const QHash<QString, QString>& translatedIds,
+                                        const QStringList& untranslatableIds, QString& error)
 {
-    if (translatedIds.isEmpty())
+    if (translatedIds.isEmpty() && untranslatableIds.isEmpty())
         return true;
     if (!database_.transaction()) {
         error = QStringLiteral("Could not begin message ID migration.");
@@ -379,6 +426,21 @@ bool MailIndexService::migrateMessageIds(const QHash<QString, QString>& translat
     updateLegacy.prepare(QStringLiteral(
         "UPDATE outlook_message_index SET message_id = :target, id_format = 'immutable' "
         "WHERE message_id = :source AND id_format != 'immutable'"));
+
+    QSqlQuery removeUntranslatable(database_);
+    removeUntranslatable.prepare(QStringLiteral(
+        "DELETE FROM outlook_message_index WHERE message_id = :source AND id_format != 'immutable'"));
+
+    for (const QString& sourceId : untranslatableIds) {
+        removeUntranslatable.bindValue(QStringLiteral(":source"), sourceId);
+        if (!removeUntranslatable.exec()) {
+            const QSqlError databaseError = removeUntranslatable.lastError();
+            database_.rollback();
+            error = QStringLiteral("Could not remove obsolete saved message IDs from the local index.");
+            qCWarning(mailIndexLog) << "Could not remove untranslatable legacy message ID:" << databaseError.text();
+            return false;
+        }
+    }
 
     for (auto it = translatedIds.cbegin(); it != translatedIds.cend(); ++it) {
         if (it.key().isEmpty() || it.value().isEmpty())

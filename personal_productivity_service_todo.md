@@ -45,7 +45,7 @@ The most important architectural decision is to make the background services, ti
 ## 3. Microsoft Outlook integration
 
 - [x] Authenticate through Microsoft's official authentication and mail APIs; Microsoft identity platform device-code flow obtains delegated tokens and Microsoft Graph v1.0 handles mail requests.
-- [x] Use Microsoft Graph 1.0 with Microsoft identity platform device-code sign-in and delegated Mail.ReadWrite and Mail.Send scopes for the signed-in mailbox.
+- [x] Use Microsoft Graph 1.0 with Microsoft identity platform device-code sign-in and delegated User.Read, Mail.ReadWrite, and Mail.Send scopes for the signed-in mailbox and saved ID translation.
 - [x] Store authentication tokens securely using the operating system's available credential storage. Outlook access and refresh tokens are stored through Linux Secret Service using `secret-tool`, not in the application database.
 - [x] Provide connection, disconnection, and authentication recovery flows. Outlook setup uses account-type choices with a custom-tenant option and client-ID validation; device sign-in opens the browser, copies the code, and closes its dialog after credentials are stored. Saved connection state is restored asynchronously, configuration mismatches are rejected before token refresh, and revoked credentials are cleared with a reconnect prompt.
 - [x] Retrieve mailbox messages and maintain a local index of previously discovered mail. The Outlook settings action indexes the latest mailbox page (up to 100) into SQLite, updating existing message metadata without storing bodies and retaining each message's parent folder ID.
@@ -70,28 +70,29 @@ The most important architectural decision is to make the background services, ti
 - [x] Automatically mark messages in ignored folders as read in the remote mail service. Delta sync marks unread messages in explicitly selected folders as read through Graph and updates the local index after Microsoft confirms success. Adding a folder rule queues a full sync of that folder to include existing unread messages.
 - [x] Apply rules to incoming mail and reconcile rules against existing messages when appropriate. Delta synchronization applies current rules to incoming/changed messages; adding a sender rule queues all indexed folders, while adding a folder rule queues only that folder. Rescan requests persist until a successful folder scan completes.
 - [x] Handle failures to update remote read status and retry safely. Graph retries transient failures; if a read-state update still fails, sync stops before saving the folder delta cursor so the batch is replayed next time.
-- [ ] Provide an **Unread mail** view:
-  - [ ] Include unread messages across all accessible folders, not just the inbox.
-  - [ ] Sort newest first.
-  - [ ] Show a genuinely empty list when there are no unread messages.
-  - [ ] Reflect read-status changes made in Outlook or by the application.
-- [ ] Provide an **All mail** view for browsing existing read and unread messages.
-- [ ] Support refreshing, searching, opening, and navigating between messages.
-- [ ] Provide sender, subject, received date, folder, and read/important status where available.
+- [x] Provide an **Unread mail** view:
+  - [x] Include unread messages across all accessible folders, not just the inbox. The view reads all unread rows from the local index, which is populated by mailbox scans and per-folder delta synchronization.
+  - [x] Sort newest first.
+  - [x] Show a genuinely empty list when there are no unread messages.
+  - [x] Reflect read-status changes made in Outlook or by the application. Delta sync updates the shared index; the view refreshes after sync, on demand, and every five seconds.
+- [x] Provide an **All mail** view for browsing existing read and unread messages. The All mail tab displays all locally indexed messages, newest first, and shares manual refresh and Graph synchronization controls.
+- [x] Support refreshing, searching, opening, and navigating between messages. Both mail lists support refresh and sender/subject search; double-click opens a message dialog with Newer/Older navigation through the current filtered results.
+- [x] Provide sender, subject, received date, folder, and read/important status where available. Mail rows show sender, subject, and received time; message details show read state, importance, and the Graph parent-folder ID.
 
 ## 5. Email message viewer and HTML safety
 
-- [ ] Implement an in-app message viewer.
-- [ ] Render HTML email bodies where possible, with a plain-text fallback.
-- [ ] Preserve reasonable email formatting, links, lists, tables, and inline images.
-- [ ] Treat email content as untrusted input.
-- [ ] Prevent email HTML from executing arbitrary JavaScript.
-- [ ] Disable access to local files and arbitrary local resources.
-- [ ] Prevent remote content from loading automatically unless explicitly allowed.
-- [ ] Sanitize unsafe HTML and restrict navigation to permitted URL schemes.
-- [ ] Prevent email content from accessing application privileges or local credentials.
-- [ ] Provide a way to open legitimate links externally.
-- [ ] Clearly handle blocked images, unsupported content, and rendering failures.
+- [x] Implement an in-app message viewer. Opening a message from either mail list fetches it from Microsoft Graph and shows its headers and plain-text body/preview in a non-blocking dialog; HTML rendering remains a separate item below.
+- [x] Render HTML email bodies where possible, with a plain-text fallback. The in-app viewer uses Qt rich text for HTML bodies, falls back to Graph's plain-text preview when the body is unavailable, and blocks links and all resource loads.
+- [x] Preserve reasonable email formatting, links, lists, tables, and inline images. Qt rich text preserves supported HTML structure; inline CID images are resolved only from bounded, allowlisted image attachments, while links remain inert in this rendering step.
+- [x] Treat email content as untrusted input. The in-app renderer uses Qt rich text, keeps links inert, blocks resource loading by default, and only permits validated, bounded inline CID image attachments.
+- [x] Prevent email HTML from executing arbitrary JavaScript. Messages render through Qt's QTextBrowser rich-text engine, which does not provide a JavaScript runtime; the application does not load email into a web engine.
+- [x] Disable access to local files and arbitrary local resources. The viewer overrides resource loading and only serves validated inline CID images already fetched from the current message; local paths and all other schemes are rejected.
+- [x] Prevent remote content from loading automatically unless explicitly allowed. Remote URLs are rejected by the viewer's resource loader; no automatic remote-content setting is enabled.
+- [x] Sanitize unsafe HTML and restrict navigation to permitted URL schemes. libxml2 parses fragments with network access disabled; active-content elements and unapproved attributes are removed, inline CSS is allowlisted, and links retain only HTTP, HTTPS, or mailto schemes. Link activation remains disabled in the viewer.
+- [x] Prevent email content from accessing application privileges or local credentials. Email is rendered in an isolated Qt rich-text widget without a web engine, JavaScript bridge, application callbacks, or credential APIs; local resource access is blocked.
+- [x] Provide a way to open legitimate links externally. Clicking a sanitized HTTP(S) or mailto link opens it through the desktop's default handler after a second scheme/host validation; automatic navigation remains disabled.
+- [x] Ask before opening links from email, allow exact domains to be trusted, and manage saved trust in Settings. Each untrusted HTTP(S) domain prompts with Open once, Always trust this domain, or Cancel; exact host rules persist and can be removed from Application settings. mailto links prompt for each open.
+- [x] Clearly handle blocked images, unsupported content, and rendering failures. The viewer explains blocked remote/local images and unsupported formats, identifies unsupported or unavailable body formats, falls back to plain text when sanitization/rendering cannot proceed, and reports malformed Graph message responses.
 
 ## 6. TODO manager
 
@@ -100,14 +101,18 @@ The most important architectural decision is to make the background services, ti
 - [ ] Support linking TODOs to:
   - [x] Local files.
   - [x] Websites.
-  - [ ] Emails stored in the mail service.
+  - [x] Emails stored in the mail service. TODOs can select a locally indexed message, persist its stable message ID, and open it through the in-app All mail viewer.
   - [x] Persistent notes in the note service.
   - [x] Quick notes in the note service.
 - [x] Allow links to be opened from the TODO item.
 - [x] Preserve links using stable identifiers where possible, rather than fragile display names.
 - [x] Display upcoming, overdue, completed, and unscheduled tasks.
 - [x] Allow manual creation and editing of deadlines.
-- [ ] Support automatic TODO creation for important email senders.
+- [x] Support automatic TODO creation for important email senders. Newly indexed delta-sync messages from configured exact sender addresses create linked follow-up TODOs; initial/full mailbox scans stay silent.
+  - [x] Configure exact important sender addresses in Outlook settings with add/remove controls and persistent storage.
+- [x] Use the system's local timezone. Receipt times are converted to local time before applying the deadline schedule.
+- [x] Persist the computed deadline so subsequent scans do not recalculate it. The deadline is saved in the TODO record as UTC.
+- [x] Define a deterministic policy for mail received after midnight and for messages imported long after their original arrival. Deadlines use the message's original local receipt date; a late-discovered delta message can therefore create an already-overdue TODO. Initial and full scans do not create these TODOs.
 - [ ] Prevent duplicate TODO creation when the same email is encountered during synchronization.
 - [ ] Route all deadline reminders through the shared timer and notification service.
 
@@ -121,9 +126,9 @@ When an email from an important sender arrives, create a TODO with a deadline de
 | From 16:00 until before 21:00 | Today at 22:00 |
 | At or after 21:00 | Tomorrow at 17:00 |
 
-- [ ] Use the system's local timezone.
-- [ ] Persist the computed deadline so subsequent scans do not recalculate it.
-- [ ] Define a deterministic policy for mail received after midnight and for messages imported long after their original arrival.
+- [x] Use the system's local timezone.
+- [x] Persist the computed deadline so subsequent scans do not recalculate it.
+- [x] Define a deterministic policy for mail received after midnight and for messages imported long after their original arrival.
 - [ ] Ensure all generated TODOs use the same reminder rules as manually created TODOs.
 
 ## 7. Unified timer and notification engine
@@ -220,6 +225,7 @@ Recurring timers are different:
 
 ## 12. Reliability, security, and diagnostics
 
+- [x] Provide a shared, visible work-descriptor system with recursive subtasks, calculated or indeterminate progress, and task outcomes. The Activity tab and main status bar show Microsoft Graph work, mailbox scans and sync trees, Outlook authentication, notification delivery, timer/TODO/note changes, and user-triggered settings changes. Future operations follow `WORK_DESCRIPTORS.md` and `AGENTS.md`.
 - [x] Use structured application logs with timestamps, severity levels, and subsystem identifiers.
 - [ ] Log synchronization failures and timer scheduling errors without exposing message bodies or secrets. Timer scheduling failures log only database error metadata; mail synchronization logging remains pending.
 - [ ] Provide useful diagnostics for authentication, connectivity, and API failures. Device-code sign-in now shows Microsoft's sanitized error description and AADSTS code; broader diagnostics remain pending.

@@ -115,6 +115,7 @@ QString NotesService::savePersistentNote(const QString& id, const QString& title
         return {};
     const QString noteId = id.isEmpty() ? QUuid::createUuid().toString(QUuid::WithoutBraces) : id;
     const QString savedTitle = title.trimmed().isEmpty() ? QStringLiteral("Untitled note") : title.trimmed();
+    const QString savedMarkdown = markdown.isNull() ? QStringLiteral("") : markdown;
     const QString now = currentTimestamp();
     QSqlQuery query(database_);
 
@@ -130,7 +131,7 @@ QString NotesService::savePersistentNote(const QString& id, const QString& title
     }
     query.bindValue(QStringLiteral(":id"), noteId);
     query.bindValue(QStringLiteral(":title"), savedTitle);
-    query.bindValue(QStringLiteral(":markdown"), markdown);
+    query.bindValue(QStringLiteral(":markdown"), savedMarkdown);
     query.bindValue(QStringLiteral(":updated"), now);
     if (!query.exec() || query.numRowsAffected() != 1) {
         qCWarning(notesLog) << "Could not save persistent note:" << query.lastError().text();

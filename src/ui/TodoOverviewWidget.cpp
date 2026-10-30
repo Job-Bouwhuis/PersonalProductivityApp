@@ -1,9 +1,12 @@
 #include "TodoOverviewWidget.h"
 
+#include "MailIndexService.h"
 #include "NotesService.h"
+#include "WorkDescriptorService.h"
 
 #include <QCheckBox>
 #include <QComboBox>
+#include <QCompleter>
 #include <QDateTimeEdit>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -43,7 +46,8 @@ QString linkDisplay(const services::TodoRecord& todo)
 
 bool editDialog(QWidget* parent,
                 services::TodoRecord& todo,
-                const services::NotesService& notesService)
+                const services::NotesService& notesService,
+                const services::MailIndexService& mailIndexService)
 {
     QDialog dialog(parent);
     dialog.setWindowTitle(todo.id.isEmpty() ? QStringLiteral("New TODO") : QStringLiteral("Edit TODO"));
@@ -68,6 +72,7 @@ bool editDialog(QWidget* parent,
     linkType->addItem(QStringLiteral("Local file"), QStringLiteral("file"));
     linkType->addItem(QStringLiteral("Persistent note"), QStringLiteral("note"));
     linkType->addItem(QStringLiteral("Quick note"), QStringLiteral("quick_note"));
+    linkType->addItem(QStringLiteral("Email message"), QStringLiteral("email"));
     int linkIndex = linkType->findData(todo.linkType);
     linkType->setCurrentIndex(linkIndex < 0 ? 0 : linkIndex);
     auto* target = new QLineEdit(todo.linkTarget, &dialog);
@@ -80,6 +85,27 @@ bool editDialog(QWidget* parent,
     const int noteIndex = note->findData(todo.linkTarget);
     if (noteIndex >= 0)
         note->setCurrentIndex(noteIndex);
+    auto* email = new QComboBox(&dialog);
+    email->setEditable(true);
+    email->setInsertPolicy(QComboBox::NoInsert);
+    email->setPlaceholderText(QStringLiteral("Search indexed email…"));
+    email->completer()->setFilterMode(Qt::MatchContains);
+    email->completer()->setCaseSensitivity(Qt::CaseInsensitive);
+    email->addItem(QStringLiteral("Choose an email…"), QString());
+    for (const auto& message : mailIndexService.allMessages()) {
+        const QString sender = message.senderName.isEmpty() ? message.senderAddress : message.senderName;
+        const QString subject = message.subject.isEmpty() ? QStringLiteral("(no subject)") : message.subject;
+        const QString label = sender.isEmpty() ? subject : sender + QStringLiteral(" — ") + subject;
+        email->addItem(label, message.messageId);
+    }
+    if (!todo.linkTarget.isEmpty() && todo.linkType == QLatin1String("email") &&
+        email->findData(todo.linkTarget) < 0) {
+        email->addItem(todo.linkLabel.isEmpty() ? QStringLiteral("Email no longer indexed") : todo.linkLabel,
+                       todo.linkTarget);
+    }
+    const int emailIndex = email->findData(todo.linkTarget);
+    if (emailIndex >= 0)
+        email->setCurrentIndex(emailIndex);
     auto* browse = new QPushButton(QStringLiteral("Browse…"), &dialog);
     auto* targetRow = new QWidget(&dialog);
     auto* targetLayout = new QHBoxLayout(targetRow);
@@ -93,12 +119,14 @@ bool editDialog(QWidget* parent,
     form->addRow(QStringLiteral("Link type"), linkType);
     form->addRow(QStringLiteral("Link"), targetRow);
     form->addRow(QStringLiteral("Note"), note);
+    form->addRow(QStringLiteral("Email"), email);
     layout->addLayout(form);
 
     auto updateLinkControls = [=] {
         const QString type = linkType->currentData().toString();
         targetRow->setVisible(type == QLatin1String("website") || type == QLatin1String("file"));
         note->setVisible(type == QLatin1String("note") || type == QLatin1String("quick_note"));
+        email->setVisible(type == QLatin1String("email"));
         browse->setVisible(type == QLatin1String("file"));
     };
     QObject::connect(linkType, &QComboBox::currentIndexChanged, &dialog, updateLinkControls);
@@ -121,12 +149,24 @@ bool editDialog(QWidget* parent,
     todo.description = description->toPlainText();
     todo.deadline = hasDeadline->isChecked() ? deadline->dateTime().toUTC() : QDateTime();
     todo.linkType = linkType->currentData().toString();
-    todo.linkTarget = (todo.linkType == QLatin1String("note") || todo.linkType == QLatin1String("quick_note")) ? note->currentData().toString()
-                                                             : (todo.linkType.isEmpty() ? QString() : target->text().trimmed());
-    todo.linkLabel = (todo.linkType == QLatin1String("note") || todo.linkType == QLatin1String("quick_note")) ? note->currentText()
-        : (todo.linkType.isEmpty() ? QString() : target->text().trimmed());
+    if (todo.linkType == QLatin1String("note") || todo.linkType == QLatin1String("quick_note")) {
+        todo.linkTarget = note->currentData().toString();
+        todo.linkLabel = note->currentText();
+    } else if (todo.linkType == QLatin1String("email")) {
+        todo.linkTarget = email->currentData().toString();
+        todo.linkLabel = email->currentText();
+    } else {
+        todo.linkTarget = todo.linkType.isEmpty() ? QString() : target->text().trimmed();
+        todo.linkLabel = todo.linkTarget;
+    }
     if (todo.title.isEmpty()) {
         QMessageBox::warning(parent, QStringLiteral("TODO title required"), QStringLiteral("Enter a title for this TODO."));
+        return false;
+    }
+    if (todo.linkType == QLatin1String("email") &&
+        (email->currentIndex() <= 0 || email->currentData().toString().isEmpty())) {
+        QMessageBox::warning(parent, QStringLiteral("Email link required"),
+                             QStringLiteral("Choose an indexed email from the list."));
         return false;
     }
     if (!todo.linkType.isEmpty() && todo.linkTarget.isEmpty()) {
@@ -140,12 +180,18 @@ bool editDialog(QWidget* parent,
 
 TodoOverviewWidget::TodoOverviewWidget(services::TodoService& todoService,
                                        services::NotesService& notesService,
+                                       services::MailIndexService& mailIndexService,
+                                       services::WorkDescriptorService& workService,
                                        std::function<void(const QString&, bool)> openNote,
+                                       std::function<void(const QString&)> openEmail,
                                        QWidget* parent)
     : QWidget(parent)
     , todoService_(todoService)
     , notesService_(notesService)
+    , mailIndexService_(mailIndexService)
+    , workService_(workService)
     , openNote_(std::move(openNote))
+    , openEmail_(std::move(openEmail))
 {
     auto* layout = new QVBoxLayout(this);
     auto* controls = new QHBoxLayout;
@@ -245,13 +291,16 @@ void TodoOverviewWidget::refresh(const QString& preferredId)
 void TodoOverviewWidget::createTodo()
 {
     services::TodoRecord todo;
-    if (!editDialog(this, todo, notesService_))
+    if (!editDialog(this, todo, notesService_, mailIndexService_))
         return;
+    const QString workId = workService_.startTask(QStringLiteral("Create TODO"));
     const QString id = todoService_.saveTodo(todo);
     if (id.isEmpty()) {
+        workService_.failTask(workId, QStringLiteral("The TODO or its link is invalid"));
         QMessageBox::warning(this, QStringLiteral("Could not save TODO"), QStringLiteral("The TODO or its link is invalid."));
         return;
     }
+    workService_.completeTask(workId, QStringLiteral("TODO created"));
     refresh(id);
 }
 
@@ -260,13 +309,16 @@ void TodoOverviewWidget::editTodo()
     auto todo = selectedTodo();
     if (todo.id.isEmpty())
         return;
-    if (!editDialog(this, todo, notesService_))
+    if (!editDialog(this, todo, notesService_, mailIndexService_))
         return;
+    const QString workId = workService_.startTask(QStringLiteral("Save TODO changes"));
     const QString id = todoService_.saveTodo(todo);
     if (id.isEmpty()) {
+        workService_.failTask(workId, QStringLiteral("The TODO or its link is invalid"));
         QMessageBox::warning(this, QStringLiteral("Could not save TODO"), QStringLiteral("The TODO or its link is invalid."));
         return;
     }
+    workService_.completeTask(workId, QStringLiteral("TODO updated"));
     refresh(id);
 }
 
@@ -277,9 +329,17 @@ void TodoOverviewWidget::toggleCompletion()
         return;
     todo.status = todo.status == services::TodoStatus::Completed
         ? services::TodoStatus::Open : services::TodoStatus::Completed;
+    const QString workId = workService_.startTask(todo.status == services::TodoStatus::Completed
+                                                      ? QStringLiteral("Complete TODO")
+                                                      : QStringLiteral("Reopen TODO"));
     const QString id = todoService_.saveTodo(todo);
-    if (!id.isEmpty())
+    if (!id.isEmpty()) {
+        workService_.completeTask(workId, todo.status == services::TodoStatus::Completed
+                                              ? QStringLiteral("TODO completed") : QStringLiteral("TODO reopened"));
         refresh(id);
+    } else {
+        workService_.failTask(workId, QStringLiteral("Could not update TODO status"));
+    }
 }
 
 void TodoOverviewWidget::deleteTodo()
@@ -291,20 +351,41 @@ void TodoOverviewWidget::deleteTodo()
             QStringLiteral("Delete ‘%1’ permanently?").arg(todo.title),
             QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Yes)
         return;
-    todoService_.deleteTodo(todo.id);
+    const QString workId = workService_.startTask(QStringLiteral("Delete TODO"));
+    if (todoService_.deleteTodo(todo.id))
+        workService_.completeTask(workId, QStringLiteral("TODO deleted"));
+    else
+        workService_.failTask(workId, QStringLiteral("Could not delete TODO"));
     refresh();
 }
 
 void TodoOverviewWidget::openLink()
 {
     const auto todo = selectedTodo();
+    if (todo.linkType.isEmpty())
+        return;
+    const QString workId = workService_.startTask(QStringLiteral("Open TODO link"));
     if (todo.linkType == QLatin1String("note") || todo.linkType == QLatin1String("quick_note")) {
         if (openNote_)
             openNote_(todo.linkTarget, todo.linkType == QLatin1String("quick_note"));
+        workService_.completeTask(workId, QStringLiteral("Opened linked note"));
+    } else if (todo.linkType == QLatin1String("email")) {
+        if (openEmail_) {
+            openEmail_(todo.linkTarget);
+            workService_.completeTask(workId, QStringLiteral("Opened linked email"));
+        } else {
+            workService_.failTask(workId, QStringLiteral("The mail viewer is unavailable"));
+        }
     } else if (todo.linkType == QLatin1String("website")) {
-        QDesktopServices::openUrl(QUrl(todo.linkTarget));
+        if (QDesktopServices::openUrl(QUrl(todo.linkTarget)))
+            workService_.completeTask(workId, QStringLiteral("Opened website"));
+        else
+            workService_.failTask(workId, QStringLiteral("Could not open website"));
     } else if (todo.linkType == QLatin1String("file")) {
-        QDesktopServices::openUrl(QUrl::fromLocalFile(todo.linkTarget));
+        if (QDesktopServices::openUrl(QUrl::fromLocalFile(todo.linkTarget)))
+            workService_.completeTask(workId, QStringLiteral("Opened local file"));
+        else
+            workService_.failTask(workId, QStringLiteral("Could not open local file"));
     }
 }
 

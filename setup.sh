@@ -89,29 +89,29 @@ run_as_root() {
 }
 
 install_build_tools() {
-    echo "Installing CMake, a C++ compiler, pkg-config, OpenGL development files, and curl..."
+    echo "Installing CMake, a C++ compiler, pkg-config, OpenGL and libxml2 development files, and curl..."
     case "$package_manager" in
         apt-get)
             run_as_root apt-get update
-            run_as_root apt-get install -y cmake build-essential pkg-config libgl1-mesa-dev curl
+            run_as_root apt-get install -y cmake build-essential pkg-config libgl1-mesa-dev libxml2-dev curl
             ;;
         dnf|yum)
-            run_as_root "$package_manager" install -y cmake gcc-c++ pkgconf-pkg-config mesa-libGL-devel curl
+            run_as_root "$package_manager" install -y cmake gcc-c++ pkgconf-pkg-config mesa-libGL-devel libxml2-devel curl
             ;;
         pacman)
-            run_as_root pacman -S --needed --noconfirm cmake base-devel pkgconf mesa curl
+            run_as_root pacman -S --needed --noconfirm cmake base-devel pkgconf mesa libxml2 curl
             ;;
         zypper)
-            run_as_root zypper --non-interactive install cmake gcc-c++ pkg-config Mesa-libGL-devel curl
+            run_as_root zypper --non-interactive install cmake gcc-c++ pkg-config Mesa-libGL-devel libxml2-devel curl
             ;;
         apk)
-            run_as_root apk add cmake build-base pkgconf mesa-gl-dev curl
+            run_as_root apk add cmake build-base pkgconf mesa-gl-dev libxml2-dev curl
             ;;
         emerge)
-            run_as_root emerge --ask=n dev-build/cmake sys-devel/gcc virtual/pkgconfig media-libs/mesa net-misc/curl
+            run_as_root emerge --ask=n dev-build/cmake sys-devel/gcc virtual/pkgconfig media-libs/mesa dev-libs/libxml2 net-misc/curl
             ;;
         xbps-install)
-            run_as_root xbps-install -Sy cmake gcc pkg-config mesa-devel curl
+            run_as_root xbps-install -Sy cmake gcc pkg-config mesa-devel libxml2-devel curl
             ;;
         *)
             printf 'setup.sh: automatic build-tool installation is not configured for %s.\n' "$package_manager" >&2

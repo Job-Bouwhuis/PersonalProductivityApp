@@ -13,6 +13,7 @@ namespace productivity::services {
 class MailIndexService;
 class MicrosoftGraphClient;
 class ApplicationSettings;
+class WorkDescriptorService;
 
 class MailDeltaSyncService final : public QObject
 {
@@ -20,6 +21,7 @@ class MailDeltaSyncService final : public QObject
 public:
     MailDeltaSyncService(MicrosoftGraphClient& graphClient, MailIndexService& mailIndex,
                          ApplicationSettings& settings,
+                         WorkDescriptorService& workService,
                          QObject* parent = nullptr);
 
     bool isRunning() const;
@@ -27,7 +29,7 @@ public:
 
 signals:
     void progressChanged(const QString& status);
-    void finished(int changedCount, int removedCount);
+    void finished(int changedCount, int removedCount, int untranslatableIdCount);
     void newMessagesReceived(const QJsonArray& messages);
     void failed(const QString& error);
 
@@ -49,6 +51,8 @@ private:
     MicrosoftGraphClient& graphClient_;
     MailIndexService& mailIndex_;
     ApplicationSettings& settings_;
+    WorkDescriptorService& workService_;
+    QString workTaskId_;
     Phase phase_ = Phase::Idle;
     quint64 requestId_ = 0;
     QString currentFolderId_;
@@ -59,6 +63,7 @@ private:
     int folderIndex_ = 0;
     int changedCount_ = 0;
     int removedCount_ = 0;
+    int untranslatableIdCount_ = 0;
     QJsonArray newMessages_;
     bool currentFolderRescanRequired_ = false;
     QQueue<QString> ignoredMessagesToMarkRead_;

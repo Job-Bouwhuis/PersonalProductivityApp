@@ -17,6 +17,7 @@ class OutlookAuthService;
 class MicrosoftGraphClient;
 class MailIndexService;
 class MailDeltaSyncService;
+class WorkDescriptorService;
 }
 
 namespace productivity::ui {
@@ -28,6 +29,8 @@ public:
                    services::OutlookAuthService& outlookAuthService,
                    services::MicrosoftGraphClient& graphClient,
                    services::MailIndexService& mailIndexService,
+                   services::MailDeltaSyncService& mailDeltaSync,
+                   services::WorkDescriptorService& workService,
                    bool trayAvailable,
                    std::function<bool(bool)> startOnLoginChanged,
                    std::function<void(bool)> closeToTrayChanged,
@@ -43,7 +46,8 @@ private:
     services::OutlookAuthService& outlookAuthService_;
     services::MicrosoftGraphClient& graphClient_;
     services::MailIndexService& mailIndexService_;
-    services::MailDeltaSyncService* mailDeltaSync_ = nullptr;
+    services::MailDeltaSyncService& mailDeltaSync_;
+    services::WorkDescriptorService& workService_;
     std::function<bool(bool)> startOnLoginChanged_;
     QCheckBox* startOnLogin_ = nullptr;
     QCheckBox* startMinimized_ = nullptr;

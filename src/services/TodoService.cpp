@@ -64,6 +64,8 @@ bool validLink(const TodoRecord& todo, QSqlDatabase database)
         query.bindValue(QStringLiteral(":id"), todo.linkTarget);
         return query.exec() && query.next();
     }
+    if (todo.linkType == QLatin1String("email"))
+        return !todo.linkTarget.trimmed().isEmpty();
     return false;
 }
 
@@ -157,7 +159,11 @@ QString TodoService::saveTodo(const TodoRecord& todo)
     const QString id = todo.id.isEmpty() ? QUuid::createUuid().toString(QUuid::WithoutBraces) : todo.id;
     const QString now = QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs);
     const QString deadline = todo.deadline.isValid()
-        ? todo.deadline.toUTC().toString(Qt::ISODateWithMs) : QString();
+        ? todo.deadline.toUTC().toString(Qt::ISODateWithMs) : QStringLiteral("");
+    const QString description = todo.description.isNull() ? QStringLiteral("") : todo.description;
+    const QString linkType = todo.linkType.isNull() ? QStringLiteral("") : todo.linkType;
+    const QString linkTarget = todo.linkTarget.isNull() ? QStringLiteral("") : todo.linkTarget;
+    const QString linkLabel = todo.linkLabel.isNull() ? QStringLiteral("") : todo.linkLabel;
     QSqlQuery query(database_);
     if (todo.id.isEmpty()) {
         query.prepare(QStringLiteral(
@@ -173,13 +179,13 @@ QString TodoService::saveTodo(const TodoRecord& todo)
     }
     query.bindValue(QStringLiteral(":id"), id);
     query.bindValue(QStringLiteral(":title"), title);
-    query.bindValue(QStringLiteral(":description"), todo.description);
+    query.bindValue(QStringLiteral(":description"), description);
     query.bindValue(QStringLiteral(":status"), statusName(todo.status));
     query.bindValue(QStringLiteral(":deadline"), deadline);
     query.bindValue(QStringLiteral(":updated"), now);
-    query.bindValue(QStringLiteral(":link_type"), todo.linkType);
-    query.bindValue(QStringLiteral(":link_target"), todo.linkTarget);
-    query.bindValue(QStringLiteral(":link_label"), todo.linkLabel);
+    query.bindValue(QStringLiteral(":link_type"), linkType);
+    query.bindValue(QStringLiteral(":link_target"), linkTarget);
+    query.bindValue(QStringLiteral(":link_label"), linkLabel);
     if (!query.exec() || query.numRowsAffected() != 1) {
         qCWarning(todoLog) << "Could not save TODO item:" << query.lastError().text();
         database_.rollback();

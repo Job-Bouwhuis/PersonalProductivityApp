@@ -159,7 +159,7 @@ void OutlookAuthService::requestDeviceCode()
     QUrlQuery form;
     form.addQueryItem(QStringLiteral("client_id"), clientId_);
     form.addQueryItem(QStringLiteral("scope"),
-                      QStringLiteral("offline_access https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send"));
+                      QStringLiteral("offline_access https://graph.microsoft.com/User.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send"));
     QNetworkReply* reply = network_.post(request, encodedForm(form));
     pendingReply_ = reply;
     const int generation = authorizationGeneration_;
@@ -270,7 +270,7 @@ void OutlookAuthService::pollForToken()
                 {QStringLiteral("tenant"), tenant_},
                 {QStringLiteral("client_id"), clientId_},
                 {QStringLiteral("delegated_scopes"), QJsonArray{
-                    QStringLiteral("Mail.ReadWrite"), QStringLiteral("Mail.Send")
+                    QStringLiteral("User.Read"), QStringLiteral("Mail.ReadWrite"), QStringLiteral("Mail.Send")
                 }},
             };
             if (!storeCredentials(QJsonDocument(credentials).toJson(QJsonDocument::Compact))) {
@@ -324,9 +324,10 @@ void OutlookAuthService::withValidAccessToken(
     }
 
     const QJsonArray grantedScopes = credentials.value(QStringLiteral("delegated_scopes")).toArray();
-    if (!grantedScopes.contains(QStringLiteral("Mail.ReadWrite")) ||
+    if (!grantedScopes.contains(QStringLiteral("User.Read")) ||
+        !grantedScopes.contains(QStringLiteral("Mail.ReadWrite")) ||
         !grantedScopes.contains(QStringLiteral("Mail.Send"))) {
-        callback({}, QStringLiteral("Outlook permissions changed. Disconnect and reconnect to grant the new delegated permissions."));
+        callback({}, QStringLiteral("Outlook permissions need updating. Disconnect and reconnect to approve the delegated Microsoft Graph User.Read, Mail.ReadWrite, and Mail.Send permissions."));
         return;
     }
 
@@ -353,7 +354,7 @@ void OutlookAuthService::withValidAccessToken(
     form.addQueryItem(QStringLiteral("client_id"), clientId);
     form.addQueryItem(QStringLiteral("refresh_token"), refreshToken);
     form.addQueryItem(QStringLiteral("scope"),
-                      QStringLiteral("offline_access https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send"));
+                      QStringLiteral("offline_access https://graph.microsoft.com/User.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send"));
     QNetworkReply* reply = network_.post(request, encodedForm(form));
     pendingReply_ = reply;
     const int generation = authorizationGeneration_;
@@ -406,7 +407,7 @@ void OutlookAuthService::withValidAccessToken(
         updatedCredentials.insert(QStringLiteral("tenant"), tenant);
         updatedCredentials.insert(QStringLiteral("client_id"), clientId);
         updatedCredentials.insert(QStringLiteral("delegated_scopes"), QJsonArray{
-            QStringLiteral("Mail.ReadWrite"), QStringLiteral("Mail.Send")
+            QStringLiteral("User.Read"), QStringLiteral("Mail.ReadWrite"), QStringLiteral("Mail.Send")
         });
         if (!self->storeCredentials(QJsonDocument(updatedCredentials).toJson(QJsonDocument::Compact))) {
             callback({}, QStringLiteral("Could not update tokens in the system credential store."));

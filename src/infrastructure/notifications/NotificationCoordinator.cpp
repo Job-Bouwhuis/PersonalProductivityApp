@@ -1,4 +1,5 @@
 #include "NotificationCoordinator.h"
+#include "WorkDescriptorService.h"
 
 #include <QLoggingCategory>
 #include <QSystemTrayIcon>
@@ -12,13 +13,18 @@ Q_LOGGING_CATEGORY(notificationLog, "application.notifications")
 
 namespace productivity::infrastructure {
 
-NotificationCoordinator::NotificationCoordinator(QSystemTrayIcon* trayIcon)
+NotificationCoordinator::NotificationCoordinator(QSystemTrayIcon* trayIcon,
+                                                   productivity::services::WorkDescriptorService& workService)
     : trayIcon_(trayIcon)
+    , workService_(workService)
 {
 }
 
-bool NotificationCoordinator::notify(const QString& title, const QString& message)
+bool NotificationCoordinator::notify(const QString& title, const QString& message,
+                                     const QString& parentWorkId)
 {
+    const QString taskId = workService_.startTask(QStringLiteral("Deliver notification"), parentWorkId);
+    workService_.updateTask(taskId, title);
     QDBusInterface notifications(
         QStringLiteral("org.freedesktop.Notifications"),
         QStringLiteral("/org/freedesktop/Notifications"),
@@ -40,6 +46,7 @@ bool NotificationCoordinator::notify(const QString& title, const QString& messag
         qint32(10000));
     if (reply.isValid()) {
         qCInfo(notificationLog) << "Desktop notification sent";
+        workService_.completeTask(taskId, QStringLiteral("Notification delivered"));
         return true;
     }
     qCWarning(notificationLog) << "Desktop notification service call failed:" << reply.error().message();
@@ -47,8 +54,10 @@ bool NotificationCoordinator::notify(const QString& title, const QString& messag
     if (trayIcon_ && trayIcon_->isVisible()) {
         trayIcon_->showMessage(title, message, QSystemTrayIcon::Information, 10000);
         qCInfo(notificationLog) << "Displayed timer notification through the system tray";
+        workService_.completeTask(taskId, QStringLiteral("Notification displayed in the system tray"));
         return true;
     }
+    workService_.failTask(taskId, QStringLiteral("No desktop notification service is available"));
     return false;
 }
 

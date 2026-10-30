@@ -10,6 +10,7 @@ class QTimer;
 
 namespace productivity::services {
 class TimerService;
+class WorkDescriptorService;
 }
 
 namespace productivity::ui {
@@ -17,7 +18,9 @@ namespace productivity::ui {
 class TimerOverviewWidget final : public QWidget
 {
 public:
-    explicit TimerOverviewWidget(services::TimerService& timerService, QWidget* parent = nullptr);
+    TimerOverviewWidget(services::TimerService& timerService,
+                        services::WorkDescriptorService& workService,
+                        QWidget* parent = nullptr);
     void setDefaultDuration(int seconds);
 
 private:
@@ -30,6 +33,7 @@ private:
     void showStatus(const QString& message);
 
     services::TimerService& timerService_;
+    services::WorkDescriptorService& workService_;
     QLineEdit* titleInput_ = nullptr;
     QSpinBox* hoursInput_ = nullptr;
     QSpinBox* minutesInput_ = nullptr;

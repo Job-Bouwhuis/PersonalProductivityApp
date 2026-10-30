@@ -11,6 +11,7 @@ class QTimer;
 
 namespace productivity::services {
 class NotesService;
+class WorkDescriptorService;
 }
 
 namespace productivity::ui {
@@ -18,7 +19,9 @@ namespace productivity::ui {
 class NotesWidget final : public QWidget
 {
 public:
-    explicit NotesWidget(services::NotesService& notesService, QWidget* parent = nullptr);
+    NotesWidget(services::NotesService& notesService,
+                services::WorkDescriptorService& workService,
+                QWidget* parent = nullptr);
     void openPersistentNote(const QString& id);
     void openQuickNote(const QString& id);
 
@@ -35,6 +38,7 @@ private:
     void showPersistentStatus(const QString& text);
 
     services::NotesService& notesService_;
+    services::WorkDescriptorService& workService_;
     QTabWidget* tabs_ = nullptr;
     QLineEdit* searchInput_ = nullptr;
     QListWidget* persistentList_ = nullptr;

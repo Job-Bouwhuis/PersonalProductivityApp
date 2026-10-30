@@ -5,8 +5,18 @@
 #include <QSqlDatabase>
 #include <QString>
 #include <QStringList>
+#include <QVector>
 
 namespace productivity::services {
+
+struct IndexedMailSummary
+{
+    QString messageId;
+    QString subject;
+    QString senderName;
+    QString senderAddress;
+    QString receivedAtUtc;
+};
 
 class MailIndexService final
 {
@@ -18,6 +28,8 @@ public:
                       QJsonArray* newlyInsertedMessages = nullptr);
     bool setMessageReadState(const QString& messageId, bool isRead, QString& error);
     int indexedMessageCount() const;
+    QVector<IndexedMailSummary> allMessages() const;
+    QVector<IndexedMailSummary> unreadMessages() const;
     bool initialMailboxScanComplete() const;
     bool markInitialMailboxScanComplete(QString& error);
     QString folderDeltaLink(const QString& folderId) const;
@@ -28,7 +40,8 @@ public:
     bool clearFolderRescanRequest(const QString& folderId, QString& error);
     bool removeMessages(const QStringList& messageIds, QString& error);
     QStringList legacyMessageIds(int limit = 1000) const;
-    bool migrateMessageIds(const QHash<QString, QString>& translatedIds, QString& error);
+    bool migrateMessageIds(const QHash<QString, QString>& translatedIds,
+                          const QStringList& untranslatableIds, QString& error);
 
 private:
     QSqlDatabase database_;

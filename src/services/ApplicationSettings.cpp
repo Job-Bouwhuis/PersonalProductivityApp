@@ -1,8 +1,24 @@
 #include "ApplicationSettings.h"
 
 #include <QSet>
+#include <QUrl>
 
 namespace productivity::services {
+namespace {
+
+QString normalizedLinkDomain(QString domain)
+{
+    domain = domain.trimmed();
+    while (domain.endsWith(QLatin1Char('.')))
+        domain.chop(1);
+    if (domain.isEmpty() || domain.contains(QLatin1Char('/')) || domain.contains(QLatin1Char('@')) ||
+        domain.contains(QLatin1Char('*')) || domain.contains(QLatin1Char(':')))
+        return {};
+    const QByteArray ascii = QUrl::toAce(domain);
+    return ascii.isEmpty() ? QString() : QString::fromLatin1(ascii).toLower();
+}
+
+} // namespace
 
 bool ApplicationSettings::startMinimized() const
 {
@@ -39,9 +55,61 @@ QStringList ApplicationSettings::ignoredSenderRules() const
     return settings_.value(QStringLiteral("outlook/ignoredSenders")).toStringList();
 }
 
+QStringList ApplicationSettings::importantSenderRules() const
+{
+    return settings_.value(QStringLiteral("outlook/importantSenders")).toStringList();
+}
+
 QVariantMap ApplicationSettings::ignoredFolderRules() const
 {
     return settings_.value(QStringLiteral("outlook/ignoredFolders")).toMap();
+}
+
+QStringList ApplicationSettings::trustedLinkDomains() const
+{
+    QStringList normalized;
+    QSet<QString> seen;
+    const QStringList saved = settings_.value(QStringLiteral("mail/trustedLinkDomains")).toStringList();
+    for (const QString& domain : saved) {
+        const QString key = normalizedLinkDomain(domain);
+        if (!key.isEmpty() && !seen.contains(key)) {
+            seen.insert(key);
+            normalized.append(key);
+        }
+    }
+    return normalized;
+}
+
+bool ApplicationSettings::isTrustedLinkDomain(const QString& domain) const
+{
+    const QString normalized = normalizedLinkDomain(domain);
+    return !normalized.isEmpty() && trustedLinkDomains().contains(normalized);
+}
+
+bool ApplicationSettings::trustLinkDomain(const QString& domain)
+{
+    const QString normalized = normalizedLinkDomain(domain);
+    if (normalized.isEmpty())
+        return false;
+    QStringList domains = trustedLinkDomains();
+    if (!domains.contains(normalized))
+        domains.append(normalized);
+    setTrustedLinkDomains(domains);
+    return sync();
+}
+
+void ApplicationSettings::setTrustedLinkDomains(const QStringList& domains)
+{
+    QStringList normalized;
+    QSet<QString> seen;
+    for (const QString& domain : domains) {
+        const QString key = normalizedLinkDomain(domain);
+        if (!key.isEmpty() && !seen.contains(key)) {
+            seen.insert(key);
+            normalized.append(key);
+        }
+    }
+    settings_.setValue(QStringLiteral("mail/trustedLinkDomains"), normalized);
 }
 
 void ApplicationSettings::setStartMinimized(bool enabled)
@@ -84,6 +152,21 @@ void ApplicationSettings::setIgnoredSenderRules(const QStringList& senders)
         normalized.append(trimmed);
     }
     settings_.setValue(QStringLiteral("outlook/ignoredSenders"), normalized);
+}
+
+void ApplicationSettings::setImportantSenderRules(const QStringList& senders)
+{
+    QStringList normalized;
+    QSet<QString> seen;
+    for (const QString& sender : senders) {
+        const QString trimmed = sender.trimmed();
+        const QString key = trimmed.toCaseFolded();
+        if (trimmed.isEmpty() || seen.contains(key))
+            continue;
+        seen.insert(key);
+        normalized.append(trimmed);
+    }
+    settings_.setValue(QStringLiteral("outlook/importantSenders"), normalized);
 }
 
 void ApplicationSettings::setIgnoredFolderRules(const QVariantMap& folderPathsById)

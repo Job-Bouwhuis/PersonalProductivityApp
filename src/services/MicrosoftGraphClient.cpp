@@ -2,6 +2,7 @@
 
 #include "ApplicationSettings.h"
 #include "OutlookAuthService.h"
+#include "WorkDescriptorService.h"
 
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -21,20 +22,64 @@ Q_LOGGING_CATEGORY(graphLog, "application.outlook.graph")
 
 namespace productivity::services {
 
+namespace {
+
+QString operationTitle(const QByteArray& method, const QString& path)
+{
+    if (path.contains(QStringLiteral("translateExchangeIds")))
+        return QStringLiteral("Translate saved mail identifiers");
+    if (path.contains(QStringLiteral("mailFolders")))
+        return QStringLiteral("Load mail folders");
+    if (path.endsWith(QStringLiteral("/sendMail")))
+        return QStringLiteral("Send email");
+    if (method == QByteArrayLiteral("PATCH"))
+        return QStringLiteral("Update mail");
+    if (path.contains(QStringLiteral("/messages")))
+        return QStringLiteral("Retrieve mail messages");
+    return QStringLiteral("Contact Microsoft Graph");
+}
+
+} // namespace
+
 MicrosoftGraphClient::MicrosoftGraphClient(ApplicationSettings& settings,
                                            OutlookAuthService& authService,
+                                           WorkDescriptorService& workService,
                                            QObject* parent)
     : QObject(parent)
     , settings_(settings)
     , authService_(authService)
     , network_(new QNetworkAccessManager(this))
+    , workService_(workService)
 {
+    connect(this, &MicrosoftGraphClient::requestFinished, this,
+            [this](quint64 requestId, int httpStatus, const QByteArray&) {
+        const QString taskId = workTaskIds_.take(requestId);
+        if (taskId.isEmpty())
+            return;
+        if (httpStatus >= 200 && httpStatus < 300)
+            workService_.completeTask(taskId, QStringLiteral("Microsoft Graph request complete"));
+        else
+            workService_.failTask(taskId, QStringLiteral("Microsoft Graph returned HTTP %1").arg(httpStatus));
+    });
+    connect(this, &MicrosoftGraphClient::requestFailed, this,
+            [this](quint64 requestId, const QString& error) {
+        const QString taskId = workTaskIds_.take(requestId);
+        if (!taskId.isEmpty())
+            workService_.failTask(taskId, error);
+    });
+    connect(this, &MicrosoftGraphClient::requestRetrying, this,
+            [this](quint64 requestId, int attempt, int, const QString& reason) {
+        const QString taskId = workTaskIds_.value(requestId);
+        if (!taskId.isEmpty())
+            workService_.updateTask(taskId, QStringLiteral("%1 (retry %2)").arg(reason).arg(attempt));
+    });
 }
 
 quint64 MicrosoftGraphClient::request(const QByteArray& method, const QString& relativePath,
-                                      const QByteArray& jsonBody)
+                                      const QByteArray& jsonBody, const QString& parentWorkId)
 {
     const quint64 requestId = nextRequestId_++;
+    trackRequest(requestId, operationTitle(method, relativePath), parentWorkId);
     static const QList<QByteArray> allowedMethods{
         QByteArrayLiteral("GET"), QByteArrayLiteral("POST"),
         QByteArrayLiteral("PATCH"), QByteArrayLiteral("DELETE")
@@ -58,6 +103,14 @@ quint64 MicrosoftGraphClient::request(const QByteArray& method, const QString& r
 
     sendRequest(requestId, method, url, jsonBody);
     return requestId;
+}
+
+void MicrosoftGraphClient::trackRequest(quint64 requestId, const QString& title,
+                                       const QString& parentWorkId)
+{
+    const QString taskId = workService_.startTask(title, parentWorkId);
+    workService_.updateTask(taskId, QStringLiteral("Waiting for Microsoft Graph…"));
+    workTaskIds_.insert(requestId, taskId);
 }
 
 void MicrosoftGraphClient::sendRequest(quint64 requestId, const QByteArray& method, const QUrl& url,
@@ -162,19 +215,39 @@ void MicrosoftGraphClient::sendRequest(quint64 requestId, const QByteArray& meth
         }, forceRefreshToken);
 }
 
-quint64 MicrosoftGraphClient::listMessages(int pageSize)
+quint64 MicrosoftGraphClient::listMessages(int pageSize, const QString& parentWorkId)
 {
     const int boundedPageSize = qBound(1, pageSize, 100);
     QUrlQuery query;
     query.addQueryItem(QStringLiteral("$top"), QString::number(boundedPageSize));
     query.addQueryItem(QStringLiteral("$select"), QStringLiteral("id,subject,from,receivedDateTime,isRead,parentFolderId"));
     return request(QByteArrayLiteral("GET"),
-                   QStringLiteral("/me/messages?") + query.toString(QUrl::FullyEncoded));
+                   QStringLiteral("/me/messages?") + query.toString(QUrl::FullyEncoded), {}, parentWorkId);
 }
 
-quint64 MicrosoftGraphClient::listMailboxMessagesPage(const QString& nextLink)
+quint64 MicrosoftGraphClient::getMessage(const QString& messageId, const QString& parentWorkId)
+{
+    if (messageId.trimmed().isEmpty()) {
+        const quint64 requestId = nextRequestId_++;
+        QMetaObject::invokeMethod(this, [this, requestId] {
+            emit requestFailed(requestId, QStringLiteral("A message ID is required."));
+        }, Qt::QueuedConnection);
+        return requestId;
+    }
+    const QString encodedId = QString::fromLatin1(QUrl::toPercentEncoding(messageId));
+    QUrlQuery query;
+    query.addQueryItem(QStringLiteral("$select"),
+        QStringLiteral("id,subject,from,toRecipients,ccRecipients,receivedDateTime,isRead,importance,parentFolderId,body,bodyPreview"));
+    query.addQueryItem(QStringLiteral("$expand"), QStringLiteral("attachments"));
+    return request(QByteArrayLiteral("GET"),
+                   QStringLiteral("/me/messages/%1?%2").arg(encodedId, query.toString(QUrl::FullyEncoded)),
+                   {}, parentWorkId);
+}
+
+quint64 MicrosoftGraphClient::listMailboxMessagesPage(const QString& nextLink, const QString& parentWorkId)
 {
     const quint64 requestId = nextRequestId_++;
+    trackRequest(requestId, QStringLiteral("Retrieve mail messages"), parentWorkId);
     const QUrl nextUrl(nextLink, QUrl::StrictMode);
     const QString path = nextUrl.path();
     const bool mailboxMessagesPath = path.startsWith(QStringLiteral("/v1.0/me/messages"));
@@ -192,13 +265,13 @@ quint64 MicrosoftGraphClient::listMailboxMessagesPage(const QString& nextLink)
     return requestId;
 }
 
-quint64 MicrosoftGraphClient::listRootMailFolders()
+quint64 MicrosoftGraphClient::listRootMailFolders(const QString& parentWorkId)
 {
     return request(QByteArrayLiteral("GET"), QStringLiteral(
-        "/me/mailFolders?includeHiddenFolders=true&$top=100&$select=id,displayName,childFolderCount"));
+        "/me/mailFolders?includeHiddenFolders=true&$top=100&$select=id,displayName,childFolderCount"), {}, parentWorkId);
 }
 
-quint64 MicrosoftGraphClient::listChildMailFolders(const QString& folderId)
+quint64 MicrosoftGraphClient::listChildMailFolders(const QString& folderId, const QString& parentWorkId)
 {
     if (folderId.isEmpty()) {
         const quint64 requestId = nextRequestId_++;
@@ -207,12 +280,13 @@ quint64 MicrosoftGraphClient::listChildMailFolders(const QString& folderId)
     }
     const QString encodedId = QString::fromLatin1(QUrl::toPercentEncoding(folderId));
     return request(QByteArrayLiteral("GET"), QStringLiteral(
-        "/me/mailFolders/%1/childFolders?includeHiddenFolders=true&$top=100&$select=id,displayName,childFolderCount").arg(encodedId));
+        "/me/mailFolders/%1/childFolders?includeHiddenFolders=true&$top=100&$select=id,displayName,childFolderCount").arg(encodedId), {}, parentWorkId);
 }
 
-quint64 MicrosoftGraphClient::listMailFoldersPage(const QString& nextLink)
+quint64 MicrosoftGraphClient::listMailFoldersPage(const QString& nextLink, const QString& parentWorkId)
 {
     const quint64 requestId = nextRequestId_++;
+    trackRequest(requestId, QStringLiteral("Load mail folders"), parentWorkId);
     const QUrl nextUrl(nextLink, QUrl::StrictMode);
     const QString path = nextUrl.path();
     if (!nextUrl.isValid() || nextUrl.scheme() != QLatin1String("https") ||
@@ -228,10 +302,11 @@ quint64 MicrosoftGraphClient::listMailFoldersPage(const QString& nextLink)
     return requestId;
 }
 
-quint64 MicrosoftGraphClient::listFolderMessageDelta(const QString& folderId, const QString& deltaLink)
+quint64 MicrosoftGraphClient::listFolderMessageDelta(const QString& folderId, const QString& deltaLink,
+                                                       const QString& parentWorkId)
 {
     if (!deltaLink.isEmpty())
-        return listFolderMessageDeltaPage(deltaLink);
+        return listFolderMessageDeltaPage(deltaLink, parentWorkId);
     if (folderId.isEmpty()) {
         const quint64 requestId = nextRequestId_++;
         emit requestFailed(requestId, QStringLiteral("A mail folder ID is required."));
@@ -242,12 +317,13 @@ quint64 MicrosoftGraphClient::listFolderMessageDelta(const QString& folderId, co
     query.addQueryItem(QStringLiteral("$top"), QStringLiteral("100"));
     query.addQueryItem(QStringLiteral("$select"), QStringLiteral("id,subject,from,receivedDateTime,isRead,parentFolderId"));
     return request(QByteArrayLiteral("GET"), QStringLiteral("/me/mailFolders/%1/messages/delta?%2")
-                       .arg(encodedId, query.toString(QUrl::FullyEncoded)));
+                       .arg(encodedId, query.toString(QUrl::FullyEncoded)), {}, parentWorkId);
 }
 
-quint64 MicrosoftGraphClient::listFolderMessageDeltaPage(const QString& nextLink)
+quint64 MicrosoftGraphClient::listFolderMessageDeltaPage(const QString& nextLink, const QString& parentWorkId)
 {
     const quint64 requestId = nextRequestId_++;
+    trackRequest(requestId, QStringLiteral("Read mail changes"), parentWorkId);
     const QUrl nextUrl(nextLink, QUrl::StrictMode);
     const QString path = nextUrl.path();
     const bool folderPath = path.startsWith(QStringLiteral("/v1.0/me/mailFolders/")) ||
@@ -266,7 +342,7 @@ quint64 MicrosoftGraphClient::listFolderMessageDeltaPage(const QString& nextLink
     return requestId;
 }
 
-quint64 MicrosoftGraphClient::translateMessageIds(const QStringList& ids)
+quint64 MicrosoftGraphClient::translateMessageIds(const QStringList& ids, const QString& parentWorkId)
 {
     if (ids.isEmpty() || ids.size() > 1000) {
         const quint64 requestId = nextRequestId_++;
@@ -281,10 +357,10 @@ quint64 MicrosoftGraphClient::translateMessageIds(const QStringList& ids)
         {QStringLiteral("sourceIdType"), QStringLiteral("restId")},
         {QStringLiteral("targetIdType"), QStringLiteral("restImmutableEntryId")}
     }).toJson(QJsonDocument::Compact);
-    return request(QByteArrayLiteral("POST"), QStringLiteral("/me/translateExchangeIds"), body);
+    return request(QByteArrayLiteral("POST"), QStringLiteral("/me/translateExchangeIds"), body, parentWorkId);
 }
 
-quint64 MicrosoftGraphClient::setMessageRead(const QString& messageId, bool isRead)
+quint64 MicrosoftGraphClient::setMessageRead(const QString& messageId, bool isRead, const QString& parentWorkId)
 {
     if (messageId.isEmpty()) {
         const quint64 requestId = nextRequestId_++;
@@ -294,7 +370,7 @@ quint64 MicrosoftGraphClient::setMessageRead(const QString& messageId, bool isRe
     const QByteArray body = QJsonDocument(QJsonObject{{QStringLiteral("isRead"), isRead}})
         .toJson(QJsonDocument::Compact);
     const QString encodedId = QString::fromLatin1(QUrl::toPercentEncoding(messageId));
-    return request(QByteArrayLiteral("PATCH"), QStringLiteral("/me/messages/%1").arg(encodedId), body);
+    return request(QByteArrayLiteral("PATCH"), QStringLiteral("/me/messages/%1").arg(encodedId), body, parentWorkId);
 }
 
 quint64 MicrosoftGraphClient::sendMail(const QString& recipient, const QString& subject,
