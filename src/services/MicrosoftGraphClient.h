@@ -37,6 +37,8 @@ public:
     quint64 setMessageRead(const QString& messageId, bool isRead, const QString& parentWorkId = {});
     quint64 sendMail(const QString& recipient, const QString& subject, const QString& body);
 
+    static QString httpFailureGuidance(int httpStatus);
+
 signals:
     void requestFinished(quint64 requestId, int httpStatus, const QByteArray& responseBody);
     void requestFailed(quint64 requestId, const QString& error);

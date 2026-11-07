@@ -50,6 +50,8 @@ bool MailIndexService::initialize()
     }
     bool hasParentFolderId = false;
     bool hasIdFormat = false;
+    bool hasIgnored = false;
+    bool hasImportant = false;
     if (!query.exec(QStringLiteral("PRAGMA table_info(outlook_message_index)"))) {
         qCCritical(mailIndexLog) << "Could not inspect Outlook message index schema:" << query.lastError().text();
         return false;
@@ -60,6 +62,10 @@ bool MailIndexService::initialize()
         }
         if (query.value(1).toString() == QLatin1String("id_format"))
             hasIdFormat = true;
+        if (query.value(1).toString() == QLatin1String("is_ignored"))
+            hasIgnored = true;
+        if (query.value(1).toString() == QLatin1String("is_important"))
+            hasImportant = true;
     }
     if (!hasParentFolderId && !query.exec(QStringLiteral(
             "ALTER TABLE outlook_message_index ADD COLUMN parent_folder_id TEXT NOT NULL DEFAULT ''"))) {
@@ -69,6 +75,16 @@ bool MailIndexService::initialize()
     if (!hasIdFormat && !query.exec(QStringLiteral(
             "ALTER TABLE outlook_message_index ADD COLUMN id_format TEXT NOT NULL DEFAULT 'legacy'"))) {
         qCCritical(mailIndexLog) << "Could not add message ID format to the local index:" << query.lastError().text();
+        return false;
+    }
+    if (!hasIgnored && !query.exec(QStringLiteral(
+            "ALTER TABLE outlook_message_index ADD COLUMN is_ignored INTEGER NOT NULL DEFAULT 0 CHECK(is_ignored IN (0, 1))"))) {
+        qCCritical(mailIndexLog) << "Could not add ignored-message state:" << query.lastError().text();
+        return false;
+    }
+    if (!hasImportant && !query.exec(QStringLiteral(
+            "ALTER TABLE outlook_message_index ADD COLUMN is_important INTEGER NOT NULL DEFAULT 0 CHECK(is_important IN (0, 1))"))) {
+        qCCritical(mailIndexLog) << "Could not add important-message state:" << query.lastError().text();
         return false;
     }
     if (!query.exec(QStringLiteral(
@@ -178,6 +194,21 @@ bool MailIndexService::setMessageReadState(const QString& messageId, bool isRead
     return false;
 }
 
+bool MailIndexService::setMessageFlags(const QString& messageId, bool ignored, bool important, QString& error)
+{
+    QSqlQuery query(database_);
+    query.prepare(QStringLiteral(
+        "UPDATE outlook_message_index SET is_ignored = :ignored, is_important = :important WHERE message_id = :id"));
+    query.bindValue(QStringLiteral(":ignored"), ignored ? 1 : 0);
+    query.bindValue(QStringLiteral(":important"), important ? 1 : 0);
+    query.bindValue(QStringLiteral(":id"), messageId);
+    if (query.exec() && query.numRowsAffected() == 1)
+        return true;
+    error = QStringLiteral("Could not update this message's local flags.");
+    qCWarning(mailIndexLog) << "Could not update indexed message flags:" << query.lastError().text();
+    return false;
+}
+
 int MailIndexService::indexedMessageCount() const
 {
     QSqlQuery query(database_);
@@ -186,12 +217,41 @@ int MailIndexService::indexedMessageCount() const
     return query.value(0).toInt();
 }
 
+bool MailIndexService::allMessagesKnown(const QJsonArray& messages, bool& allKnown, QString& error) const
+{
+    allKnown = false;
+    if (messages.isEmpty())
+        return true;
+    QSqlQuery query(database_);
+    query.prepare(QStringLiteral("SELECT 1 FROM outlook_message_index WHERE message_id = :id LIMIT 1"));
+    for (const QJsonValue& value : messages) {
+        if (!value.isObject())
+            return true;
+        const QString id = value.toObject().value(QStringLiteral("id")).toString();
+        if (id.isEmpty())
+            return true;
+        query.bindValue(QStringLiteral(":id"), id);
+        if (!query.exec()) {
+            error = QStringLiteral("Could not check whether a background mail page was already indexed.");
+            qCWarning(mailIndexLog) << "Could not check background mail page IDs:" << query.lastError().text();
+            return false;
+        }
+        if (!query.next()) {
+            query.finish();
+            return true;
+        }
+        query.finish();
+    }
+    allKnown = true;
+    return true;
+}
+
 QVector<IndexedMailSummary> MailIndexService::unreadMessages() const
 {
     QVector<IndexedMailSummary> messages;
     QSqlQuery query(database_);
     if (!query.exec(QStringLiteral(
-            "SELECT message_id, subject, sender_name, sender_address, received_at_utc "
+            "SELECT message_id, subject, sender_name, sender_address, received_at_utc, is_ignored, is_important "
             "FROM outlook_message_index WHERE is_read = 0 "
             "ORDER BY received_at_utc DESC, message_id ASC"))) {
         qCWarning(mailIndexLog) << "Could not load unread messages from the local index:" << query.lastError().text();
@@ -204,6 +264,8 @@ QVector<IndexedMailSummary> MailIndexService::unreadMessages() const
         message.senderName = query.value(2).toString();
         message.senderAddress = query.value(3).toString();
         message.receivedAtUtc = query.value(4).toString();
+        message.ignored = query.value(5).toBool();
+        message.important = query.value(6).toBool();
         messages.append(std::move(message));
     }
     return messages;
@@ -214,7 +276,7 @@ QVector<IndexedMailSummary> MailIndexService::allMessages() const
     QVector<IndexedMailSummary> messages;
     QSqlQuery query(database_);
     if (!query.exec(QStringLiteral(
-            "SELECT message_id, subject, sender_name, sender_address, received_at_utc "
+            "SELECT message_id, subject, sender_name, sender_address, received_at_utc, is_ignored, is_important "
             "FROM outlook_message_index "
             "ORDER BY received_at_utc DESC, message_id ASC"))) {
         qCWarning(mailIndexLog) << "Could not load messages from the local index:" << query.lastError().text();
@@ -227,6 +289,8 @@ QVector<IndexedMailSummary> MailIndexService::allMessages() const
         message.senderName = query.value(2).toString();
         message.senderAddress = query.value(3).toString();
         message.receivedAtUtc = query.value(4).toString();
+        message.ignored = query.value(5).toBool();
+        message.important = query.value(6).toBool();
         messages.append(std::move(message));
     }
     return messages;

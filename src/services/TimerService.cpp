@@ -1,11 +1,16 @@
 #include "TimerService.h"
 
 #include <QLoggingCategory>
+#include <QElapsedTimer>
+#include <QFile>
 #include <QSqlError>
 #include <QSqlQuery>
+#include <QTimeZone>
 #include <QUuid>
 
 #include <utility>
+
+#include <time.h>
 
 Q_LOGGING_CATEGORY(timerLog, "application.scheduler")
 
@@ -75,6 +80,35 @@ bool ensureColumn(QSqlDatabase database, const QString& name, const QString& def
     return alter.exec(QStringLiteral("ALTER TABLE scheduled_events ADD COLUMN ") + name + definition);
 }
 
+qint64 monotonicNow()
+{
+#if defined(CLOCK_BOOTTIME)
+    timespec bootTime{};
+    if (clock_gettime(CLOCK_BOOTTIME, &bootTime) == 0)
+        return static_cast<qint64>(bootTime.tv_sec) * 1000 + bootTime.tv_nsec / 1000000;
+#endif
+    QElapsedTimer timer;
+    timer.start();
+    return timer.msecsSinceReference();
+}
+
+QString currentBootId()
+{
+    QFile file(QStringLiteral("/proc/sys/kernel/random/boot_id"));
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
+        return {};
+    return QString::fromLatin1(file.readAll()).trimmed();
+}
+
+QDateTime effectiveDeadline(const QString& wallDeadline, bool useMonotonic,
+                            qint64 monotonicDeadline, const QString& bootId)
+{
+    const QDateTime persisted = QDateTime::fromString(wallDeadline, Qt::ISODate).toUTC();
+    if (!useMonotonic || monotonicDeadline <= 0 || bootId.isEmpty() || bootId != currentBootId())
+        return persisted;
+    return QDateTime::currentDateTimeUtc().addMSecs(qMax<qint64>(0, monotonicDeadline - monotonicNow()));
+}
+
 } // namespace
 
 TimerService::TimerService(QSqlDatabase database)
@@ -112,8 +146,12 @@ bool TimerService::initialize()
     }
 
     if (!ensureColumn(database_, QStringLiteral("paused"), QStringLiteral(" INTEGER NOT NULL DEFAULT 0")) ||
-        !ensureColumn(database_, QStringLiteral("paused_remaining_ms"), QStringLiteral(" INTEGER NOT NULL DEFAULT 0"))) {
-        qCCritical(timerLog) << "Could not add pause state to timer storage";
+        !ensureColumn(database_, QStringLiteral("paused_remaining_ms"), QStringLiteral(" INTEGER NOT NULL DEFAULT 0")) ||
+        !ensureColumn(database_, QStringLiteral("uses_monotonic"), QStringLiteral(" INTEGER NOT NULL DEFAULT 0")) ||
+        !ensureColumn(database_, QStringLiteral("monotonic_deadline_ms"), QStringLiteral(" INTEGER NOT NULL DEFAULT 0")) ||
+        !ensureColumn(database_, QStringLiteral("boot_id"), QStringLiteral(" TEXT NOT NULL DEFAULT ''")) ||
+        !ensureColumn(database_, QStringLiteral("recurrence_interval_ms"), QStringLiteral(" INTEGER NOT NULL DEFAULT 0"))) {
+        qCCritical(timerLog) << "Could not add timer clock state";
         return false;
     }
 
@@ -122,35 +160,106 @@ bool TimerService::initialize()
     return true;
 }
 
+QDateTime TimerService::nextChristmasDeadline(const QDateTime& now)
+{
+    QDate date(now.date().year(), 12, 25);
+    QDateTime christmas(date, QTime(9, 0), now.timeZone());
+    if (now >= christmas)
+        christmas = QDateTime(QDate(date.year() + 1, 12, 25), QTime(9, 0), now.timeZone());
+    return christmas;
+}
+
 QString TimerService::schedule(QString title, QDateTime deadline, NotificationPolicy policy,
-                               QString stableId)
+                               QString stableId, bool useMonotonicClock,
+                               qint64 recurrenceIntervalMilliseconds)
 {
     title = title.trimmed();
-    if (title.isEmpty() || !deadline.isValid() || !database_.isOpen()) {
+    if (title.isEmpty() || !deadline.isValid() || !database_.isOpen() ||
+        (policy == NotificationPolicy::Recurring && recurrenceIntervalMilliseconds <= 0 &&
+         recurrenceIntervalMilliseconds != -1)) {
         qCWarning(timerLog) << "Rejected invalid scheduled event";
         return {};
     }
+    if (policy != NotificationPolicy::Recurring)
+        recurrenceIntervalMilliseconds = 0;
 
     if (stableId.isEmpty())
         stableId = QUuid::createUuid().toString(QUuid::WithoutBraces);
 
     const QString now = QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs);
+    const QString deadlineText = deadline.toUTC().toString(Qt::ISODateWithMs);
+    const QString bootId = useMonotonicClock ? currentBootId() : QStringLiteral("");
+    useMonotonicClock = useMonotonicClock && !bootId.isEmpty();
+    const qint64 monotonicDeadline = useMonotonicClock
+        ? monotonicNow() + qMax<qint64>(0, QDateTime::currentDateTimeUtc().msecsTo(deadline.toUTC())) : 0;
+    if (!database_.transaction()) {
+        qCWarning(timerLog) << "Could not begin scheduled event update:" << database_.lastError().text();
+        return {};
+    }
+    QSqlQuery existing(database_);
+    existing.prepare(QStringLiteral(
+        "SELECT status, deadline_utc, notification_policy, uses_monotonic, monotonic_deadline_ms, boot_id, recurrence_interval_ms "
+        "FROM scheduled_events WHERE id = :id"));
+    existing.bindValue(QStringLiteral(":id"), stableId);
+    if (!existing.exec()) {
+        qCWarning(timerLog) << "Could not inspect scheduled event:" << existing.lastError().text();
+        database_.rollback();
+        return {};
+    }
+    const bool exists = existing.next();
+    const bool resetNotifications = exists &&
+        (existing.value(0).toString() != QLatin1String("active") ||
+         existing.value(1).toString() != deadlineText ||
+         existing.value(2).toString() != policyName(policy) ||
+         existing.value(6).toLongLong() != recurrenceIntervalMilliseconds ||
+         existing.value(3).toBool() != useMonotonicClock ||
+         (useMonotonicClock && (existing.value(4).toLongLong() != monotonicDeadline ||
+                                existing.value(5).toString() != bootId)));
+    existing.finish();
+    if (resetNotifications) {
+        QSqlQuery clear(database_);
+        clear.prepare(QStringLiteral("DELETE FROM notification_deliveries WHERE event_id = :id"));
+        clear.bindValue(QStringLiteral(":id"), stableId);
+        if (!clear.exec()) {
+            qCWarning(timerLog) << "Could not reset scheduled event notifications:" << clear.lastError().text();
+            database_.rollback();
+            return {};
+        }
+    }
     QSqlQuery query(database_);
-    query.prepare(QStringLiteral(
-        "INSERT INTO scheduled_events "
-        "(id, title, deadline_utc, status, notification_policy, created_at_utc, updated_at_utc) "
-        "VALUES (:id, :title, :deadline, 'active', :policy, :created, :updated)"));
+    query.prepare(exists
+        ? QStringLiteral("UPDATE scheduled_events SET title = :title, deadline_utc = :deadline, status = 'active', "
+                         "notification_policy = :policy, updated_at_utc = :updated, paused = 0, paused_remaining_ms = 0, "
+                         "uses_monotonic = :uses_monotonic, monotonic_deadline_ms = :monotonic_deadline, boot_id = :boot_id, "
+                         "recurrence_interval_ms = :recurrence_interval "
+                         "WHERE id = :id")
+        : QStringLiteral("INSERT INTO scheduled_events "
+                         "(id, title, deadline_utc, status, notification_policy, created_at_utc, updated_at_utc, "
+                         "uses_monotonic, monotonic_deadline_ms, boot_id, recurrence_interval_ms) "
+                         "VALUES (:id, :title, :deadline, 'active', :policy, :created, :updated, "
+                         ":uses_monotonic, :monotonic_deadline, :boot_id, :recurrence_interval)"));
     query.bindValue(QStringLiteral(":id"), stableId);
     query.bindValue(QStringLiteral(":title"), title);
-    query.bindValue(QStringLiteral(":deadline"), deadline.toUTC().toString(Qt::ISODateWithMs));
+    query.bindValue(QStringLiteral(":deadline"), deadlineText);
     query.bindValue(QStringLiteral(":policy"), policyName(policy));
-    query.bindValue(QStringLiteral(":created"), now);
+    query.bindValue(QStringLiteral(":uses_monotonic"), useMonotonicClock ? 1 : 0);
+    query.bindValue(QStringLiteral(":monotonic_deadline"), monotonicDeadline);
+    query.bindValue(QStringLiteral(":boot_id"), bootId);
+    query.bindValue(QStringLiteral(":recurrence_interval"), recurrenceIntervalMilliseconds);
+    if (!exists)
+        query.bindValue(QStringLiteral(":created"), now);
     query.bindValue(QStringLiteral(":updated"), now);
-    if (!query.exec()) {
+    if (!query.exec() || query.numRowsAffected() != 1) {
         const QSqlError error = query.lastError();
         qCWarning(timerLog) << "Could not schedule event; database error type:"
                             << static_cast<int>(error.type())
                             << "native code:" << error.nativeErrorCode();
+        database_.rollback();
+        return {};
+    }
+    if (!database_.commit()) {
+        qCWarning(timerLog) << "Could not commit scheduled event:" << database_.lastError().text();
+        database_.rollback();
         return {};
     }
     return stableId;
@@ -161,8 +270,9 @@ QList<ScheduledEvent> TimerService::activeEvents() const
     QList<ScheduledEvent> events;
     QSqlQuery query(database_);
     if (!query.exec(QStringLiteral(
-            "SELECT id, title, deadline_utc, status, notification_policy "
-            "FROM scheduled_events WHERE status = 'active' AND paused = 0 ORDER BY deadline_utc"))) {
+            "SELECT id, title, deadline_utc, status, notification_policy, uses_monotonic, monotonic_deadline_ms, "
+            "boot_id, created_at_utc, recurrence_interval_ms FROM scheduled_events "
+            "WHERE status = 'active' AND paused = 0 ORDER BY deadline_utc"))) {
         qCWarning(timerLog) << "Could not recover scheduled events:" << query.lastError().text();
         return events;
     }
@@ -171,9 +281,12 @@ QList<ScheduledEvent> TimerService::activeEvents() const
         ScheduledEvent event;
         event.id = query.value(0).toString();
         event.title = query.value(1).toString();
-        event.deadline = QDateTime::fromString(query.value(2).toString(), Qt::ISODate).toUTC();
+        event.deadline = effectiveDeadline(query.value(2).toString(), query.value(5).toBool(),
+                                           query.value(6).toLongLong(), query.value(7).toString());
         event.status = parseStatus(query.value(3).toString());
         event.notificationPolicy = parsePolicy(query.value(4).toString());
+        event.createdAt = QDateTime::fromString(query.value(8).toString(), Qt::ISODate).toUTC();
+        event.recurrenceIntervalMilliseconds = query.value(9).toLongLong();
         if (event.deadline.isValid())
             events.append(event);
     }
@@ -185,7 +298,9 @@ QList<ScheduledEvent> TimerService::timerEvents() const
     QList<ScheduledEvent> events;
     QSqlQuery query(database_);
     if (!query.exec(QStringLiteral(
-            "SELECT id, title, deadline_utc, status, notification_policy, paused, paused_remaining_ms "
+            "SELECT id, title, deadline_utc, status, notification_policy, paused, paused_remaining_ms, "
+            "uses_monotonic, monotonic_deadline_ms, boot_id "
+            ", recurrence_interval_ms "
             "FROM scheduled_events WHERE status = 'active' ORDER BY deadline_utc"))) {
         qCWarning(timerLog) << "Could not load timer overview events:" << query.lastError().text();
         return events;
@@ -194,11 +309,13 @@ QList<ScheduledEvent> TimerService::timerEvents() const
         ScheduledEvent event;
         event.id = query.value(0).toString();
         event.title = query.value(1).toString();
-        event.deadline = QDateTime::fromString(query.value(2).toString(), Qt::ISODate).toUTC();
+        event.deadline = effectiveDeadline(query.value(2).toString(), query.value(7).toBool(),
+                                           query.value(8).toLongLong(), query.value(9).toString());
         event.status = parseStatus(query.value(3).toString());
         event.notificationPolicy = parsePolicy(query.value(4).toString());
         event.paused = query.value(5).toBool();
         event.remainingMilliseconds = query.value(6).toLongLong();
+        event.recurrenceIntervalMilliseconds = query.value(10).toLongLong();
         if (event.deadline.isValid())
             events.append(event);
     }
@@ -221,13 +338,18 @@ bool TimerService::pause(const QString& eventId)
         return false;
     QSqlQuery lookup(database_);
     lookup.prepare(QStringLiteral(
-        "SELECT deadline_utc FROM scheduled_events WHERE id = :id AND status = 'active' AND paused = 0"));
+        "SELECT deadline_utc, uses_monotonic, monotonic_deadline_ms, boot_id "
+        "FROM scheduled_events WHERE id = :id AND status = 'active' AND paused = 0"));
     lookup.bindValue(QStringLiteral(":id"), eventId);
     if (!lookup.exec() || !lookup.next()) {
         database_.rollback();
         return false;
     }
-    const QDateTime deadline = QDateTime::fromString(lookup.value(0).toString(), Qt::ISODate).toUTC();
+    const QDateTime deadline = effectiveDeadline(lookup.value(0).toString(), lookup.value(1).toBool(),
+                                                 lookup.value(2).toLongLong(), lookup.value(3).toString());
+    const bool useMonotonic = lookup.value(1).toBool();
+    const qint64 storedMonotonicDeadline = lookup.value(2).toLongLong();
+    const QString storedBootId = lookup.value(3).toString();
     lookup.finish();
     if (!deadline.isValid()) {
         database_.rollback();
@@ -238,7 +360,10 @@ bool TimerService::pause(const QString& eventId)
     update.prepare(QStringLiteral(
         "UPDATE scheduled_events SET paused = 1, paused_remaining_ms = :remaining, updated_at_utc = :updated "
         "WHERE id = :id AND status = 'active' AND paused = 0"));
-    update.bindValue(QStringLiteral(":remaining"), qMax<qint64>(0, now.msecsTo(deadline)));
+    const qint64 remaining = useMonotonic && storedBootId == currentBootId()
+        ? qMax<qint64>(0, storedMonotonicDeadline - monotonicNow())
+        : qMax<qint64>(0, now.msecsTo(deadline));
+    update.bindValue(QStringLiteral(":remaining"), remaining);
     update.bindValue(QStringLiteral(":updated"), now.toString(Qt::ISODateWithMs));
     update.bindValue(QStringLiteral(":id"), eventId);
     if (!update.exec() || update.numRowsAffected() != 1) {
@@ -261,20 +386,27 @@ bool TimerService::resume(const QString& eventId)
         return false;
     QSqlQuery lookup(database_);
     lookup.prepare(QStringLiteral(
-        "SELECT paused_remaining_ms FROM scheduled_events WHERE id = :id AND status = 'active' AND paused = 1"));
+        "SELECT paused_remaining_ms, uses_monotonic FROM scheduled_events "
+        "WHERE id = :id AND status = 'active' AND paused = 1"));
     lookup.bindValue(QStringLiteral(":id"), eventId);
     if (!lookup.exec() || !lookup.next()) {
         database_.rollback();
         return false;
     }
     const qint64 remaining = qMax<qint64>(0, lookup.value(0).toLongLong());
+    const bool useMonotonic = lookup.value(1).toBool();
     lookup.finish();
     const QDateTime now = QDateTime::currentDateTimeUtc();
     QSqlQuery update(database_);
     update.prepare(QStringLiteral(
         "UPDATE scheduled_events SET paused = 0, paused_remaining_ms = 0, deadline_utc = :deadline, "
-        "updated_at_utc = :updated WHERE id = :id AND status = 'active' AND paused = 1"));
+        "updated_at_utc = :updated, monotonic_deadline_ms = :monotonic_deadline, boot_id = :boot_id "
+        "WHERE id = :id AND status = 'active' AND paused = 1"));
     update.bindValue(QStringLiteral(":deadline"), now.addMSecs(remaining).toString(Qt::ISODateWithMs));
+    const QString bootId = useMonotonic ? currentBootId() : QString();
+    const bool canUseMonotonic = useMonotonic && !bootId.isEmpty();
+    update.bindValue(QStringLiteral(":monotonic_deadline"), canUseMonotonic ? monotonicNow() + remaining : 0);
+    update.bindValue(QStringLiteral(":boot_id"), bootId);
     update.bindValue(QStringLiteral(":updated"), now.toString(Qt::ISODateWithMs));
     update.bindValue(QStringLiteral(":id"), eventId);
     if (!update.exec() || update.numRowsAffected() != 1) {
@@ -306,10 +438,17 @@ bool TimerService::reschedule(const QString& eventId, const QDateTime& deadline)
         return false;
     QSqlQuery query(database_);
     query.prepare(QStringLiteral(
-        "UPDATE scheduled_events SET deadline_utc = :deadline, updated_at_utc = :updated "
+        "UPDATE scheduled_events SET deadline_utc = :deadline, updated_at_utc = :updated, "
+        "monotonic_deadline_ms = CASE WHEN uses_monotonic = 1 THEN :monotonic_deadline ELSE 0 END, "
+        "boot_id = CASE WHEN uses_monotonic = 1 THEN :boot_id ELSE '' END "
         "WHERE id = :id AND status = 'active'"));
-    query.bindValue(QStringLiteral(":deadline"), deadline.toUTC().toString(Qt::ISODateWithMs));
+    const QDateTime utcDeadline = deadline.toUTC();
+    const QString bootId = currentBootId();
+    query.bindValue(QStringLiteral(":deadline"), utcDeadline.toString(Qt::ISODateWithMs));
     query.bindValue(QStringLiteral(":updated"), QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs));
+    query.bindValue(QStringLiteral(":monotonic_deadline"), monotonicNow() +
+        qMax<qint64>(0, QDateTime::currentDateTimeUtc().msecsTo(utcDeadline)));
+    query.bindValue(QStringLiteral(":boot_id"), bootId);
     query.bindValue(QStringLiteral(":id"), eventId);
     if (!query.exec()) {
         qCWarning(timerLog) << "Could not reschedule event:" << query.lastError().text();

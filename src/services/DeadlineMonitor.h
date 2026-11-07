@@ -31,6 +31,7 @@ private:
     infrastructure::NotificationCoordinator& notificationCoordinator_;
     QTimer timer_;
     QHash<QString, QDateTime> retryAfter_;
+    QHash<QString, int> finalCountdownSecond_;
 };
 
 } // namespace productivity::services

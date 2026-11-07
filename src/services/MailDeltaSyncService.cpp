@@ -3,11 +3,17 @@
 #include "MailIndexService.h"
 #include "MicrosoftGraphClient.h"
 #include "ApplicationSettings.h"
+#include "SenderRuleMatcher.h"
 #include "WorkDescriptorService.h"
 
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QLoggingCategory>
+
+#include <algorithm>
+
+Q_LOGGING_CATEGORY(mailSyncLog, "application.outlook.sync")
 
 namespace productivity::services {
 
@@ -27,8 +33,8 @@ MailDeltaSyncService::MailDeltaSyncService(MicrosoftGraphClient& graphClient,
         if (requestId == readRequestId_) {
             readRequestId_ = 0;
             if (httpStatus < 200 || httpStatus >= 300) {
-                fail(QStringLiteral("Microsoft Graph could not mark an ignored message as read (HTTP %1). The synchronization cursor was kept so the change can be retried.")
-                         .arg(httpStatus));
+                fail(QStringLiteral("Microsoft Graph could not mark an ignored message as read (HTTP %1). %2 The synchronization cursor was kept so the change can be retried.")
+                     .arg(httpStatus).arg(MicrosoftGraphClient::httpFailureGuidance(httpStatus)));
                 return;
             }
             QString error;
@@ -58,8 +64,10 @@ MailDeltaSyncService::MailDeltaSyncService(MicrosoftGraphClient& graphClient,
                 fail(QStringLiteral("Microsoft denied saved message ID migration (HTTP 403). Disconnect and reconnect Outlook to approve the delegated Microsoft Graph User.Read permission, then retry the sync."));
             } else {
                 fail(phase_ == Phase::MigratingIdentifiers
-                         ? QStringLiteral("Microsoft Graph could not migrate saved message IDs (HTTP %1). You can retry the sync.").arg(httpStatus)
-                         : QStringLiteral("Microsoft Graph could not synchronize a mail folder (HTTP %1). You can retry the sync.").arg(httpStatus));
+                     ? QStringLiteral("Microsoft Graph could not migrate saved message IDs (HTTP %1). %2")
+                           .arg(httpStatus).arg(MicrosoftGraphClient::httpFailureGuidance(httpStatus))
+                     : QStringLiteral("Microsoft Graph could not synchronize a mail folder (HTTP %1). %2")
+                           .arg(httpStatus).arg(MicrosoftGraphClient::httpFailureGuidance(httpStatus)));
             }
             return;
         }
@@ -306,18 +314,20 @@ bool MailDeltaSyncService::isIgnoredSender(const QJsonObject& message) const
     const QString address = message.value(QStringLiteral("from")).toObject()
                                 .value(QStringLiteral("emailAddress")).toObject()
                                 .value(QStringLiteral("address")).toString().trimmed();
-    if (address.isEmpty())
-        return false;
-    for (const QString& rule : settings_.ignoredSenderRules()) {
-        if (address.compare(rule.trimmed(), Qt::CaseInsensitive) == 0)
-            return true;
-    }
-    return false;
+    const QString senderName = message.value(QStringLiteral("from")).toObject()
+                                   .value(QStringLiteral("emailAddress")).toObject()
+                                   .value(QStringLiteral("name")).toString().trimmed();
+    const QStringList rules = settings_.ignoredSenderRules();
+    return std::any_of(rules.cbegin(), rules.cend(), [&address, &senderName](const QString& rule) {
+        return senderRuleMatches(address, senderName, rule);
+    });
 }
 
 bool MailDeltaSyncService::isIgnoredFolder(const QJsonObject& message) const
 {
-    const QString folderId = message.value(QStringLiteral("parentFolderId")).toString();
+    QString folderId = message.value(QStringLiteral("parentFolderId")).toString();
+    if (folderId.isEmpty())
+        folderId = currentFolderId_;
     if (folderId.isEmpty())
         return false;
     return settings_.ignoredFolderRules().contains(folderId);
@@ -365,6 +375,20 @@ void MailDeltaSyncService::finishDeltaPage()
 
 void MailDeltaSyncService::fail(const QString& error)
 {
+    QString failedPhase;
+    switch (phase_) {
+    case Phase::Idle: failedPhase = QStringLiteral("idle"); break;
+    case Phase::MigratingIdentifiers: failedPhase = QStringLiteral("identifier-migration"); break;
+    case Phase::ListingRoot: failedPhase = QStringLiteral("root-folder-listing"); break;
+    case Phase::ListingChildren: failedPhase = QStringLiteral("child-folder-listing"); break;
+    case Phase::ApplyingDeltas: failedPhase = QStringLiteral("delta-sync"); break;
+    }
+    qCWarning(mailSyncLog) << "Outlook synchronization failed"
+                           << "phase:" << failedPhase
+                           << "folder_index:" << folderIndex_
+                           << "folder_count:" << foldersToSync_.size()
+                           << "changed_count:" << changedCount_
+                           << "removed_count:" << removedCount_;
     phase_ = Phase::Idle;
     workService_.failTask(workTaskId_, error);
     ignoredMessagesToMarkRead_.clear();

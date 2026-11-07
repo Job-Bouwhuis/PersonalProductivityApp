@@ -22,6 +22,30 @@ Q_LOGGING_CATEGORY(graphLog, "application.outlook.graph")
 
 namespace productivity::services {
 
+QString MicrosoftGraphClient::httpFailureGuidance(int httpStatus)
+{
+    switch (httpStatus) {
+    case 400:
+        return QStringLiteral("Microsoft rejected the request. Refresh the mailbox data and retry.");
+    case 403:
+        return QStringLiteral("Microsoft denied access. Check Outlook mailbox permissions and consent.");
+    case 404:
+        return QStringLiteral("The requested Outlook resource was not found. Reconnect Outlook and retry.");
+    case 408:
+    case 429:
+    case 502:
+    case 503:
+    case 504:
+        return QStringLiteral("Microsoft Graph is temporarily unavailable or throttling requests. Retry shortly.");
+    default:
+        if (httpStatus >= 500)
+            return QStringLiteral("Microsoft Graph encountered a server error. Retry shortly.");
+        if (httpStatus >= 400)
+            return QStringLiteral("Microsoft Graph rejected the request. Check mailbox access and retry.");
+        return QStringLiteral("Check the Outlook connection and retry.");
+    }
+}
+
 namespace {
 
 QString operationTitle(const QByteArray& method, const QString& path)
@@ -59,7 +83,8 @@ MicrosoftGraphClient::MicrosoftGraphClient(ApplicationSettings& settings,
         if (httpStatus >= 200 && httpStatus < 300)
             workService_.completeTask(taskId, QStringLiteral("Microsoft Graph request complete"));
         else
-            workService_.failTask(taskId, QStringLiteral("Microsoft Graph returned HTTP %1").arg(httpStatus));
+            workService_.failTask(taskId, QStringLiteral("Microsoft Graph returned HTTP %1. %2")
+                                  .arg(httpStatus).arg(httpFailureGuidance(httpStatus)));
     });
     connect(this, &MicrosoftGraphClient::requestFailed, this,
             [this](quint64 requestId, const QString& error) {
@@ -220,6 +245,7 @@ quint64 MicrosoftGraphClient::listMessages(int pageSize, const QString& parentWo
     const int boundedPageSize = qBound(1, pageSize, 100);
     QUrlQuery query;
     query.addQueryItem(QStringLiteral("$top"), QString::number(boundedPageSize));
+    query.addQueryItem(QStringLiteral("$orderby"), QStringLiteral("receivedDateTime desc"));
     query.addQueryItem(QStringLiteral("$select"), QStringLiteral("id,subject,from,receivedDateTime,isRead,parentFolderId"));
     return request(QByteArrayLiteral("GET"),
                    QStringLiteral("/me/messages?") + query.toString(QUrl::FullyEncoded), {}, parentWorkId);

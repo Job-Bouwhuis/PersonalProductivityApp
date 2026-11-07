@@ -1,6 +1,7 @@
 #include "ImportantSenderTodoService.h"
 
 #include "ApplicationSettings.h"
+#include "SenderRuleMatcher.h"
 #include "TodoService.h"
 #include "WorkDescriptorService.h"
 
@@ -10,19 +11,10 @@
 #include <QTime>
 #include <QTimeZone>
 
+#include <algorithm>
+
 namespace productivity::services {
 namespace {
-
-bool isImportantSender(const QString& address, const QStringList& rules)
-{
-    if (address.trimmed().isEmpty())
-        return false;
-    for (const QString& rule : rules) {
-        if (address.compare(rule.trimmed(), Qt::CaseInsensitive) == 0)
-            return true;
-    }
-    return false;
-}
 
 QDateTime deadlineForReceivedTime(const QDateTime& receivedAt)
 {
@@ -61,7 +53,13 @@ void ImportantSenderTodoService::createForNewMessages(const QJsonArray& messages
         const QString address = message.value(QStringLiteral("from")).toObject()
             .value(QStringLiteral("emailAddress")).toObject()
             .value(QStringLiteral("address")).toString().trimmed();
-        if (isImportantSender(address, importantSenders))
+        const QString senderName = message.value(QStringLiteral("from")).toObject()
+            .value(QStringLiteral("emailAddress")).toObject()
+            .value(QStringLiteral("name")).toString().trimmed();
+        if (std::any_of(importantSenders.cbegin(), importantSenders.cend(),
+                        [&address, &senderName](const QString& rule) {
+                            return senderRuleMatches(address, senderName, rule);
+                        }))
             eligibleMessages.append(message);
     }
     if (eligibleMessages.isEmpty())
@@ -74,11 +72,19 @@ void ImportantSenderTodoService::createForNewMessages(const QJsonArray& messages
         const QJsonObject message = eligibleMessages.at(index).toObject();
         const QString messageId = message.value(QStringLiteral("id")).toString();
         const QString childTaskId = workService_.startTask(QStringLiteral("Create email follow-up TODO"), parentTaskId);
-        if (messageId.isEmpty() || processedMessageIds.contains(messageId)) {
+        if (messageId.isEmpty()) {
             workService_.failTask(childTaskId, QStringLiteral("Message has no unique stable ID"));
             continue;
         }
+        if (processedMessageIds.contains(messageId)) {
+            workService_.completeTask(childTaskId, QStringLiteral("Duplicate message skipped"));
+            continue;
+        }
         processedMessageIds.insert(messageId);
+        if (todoService_.hasEmailLinkedTodo(messageId)) {
+            workService_.completeTask(childTaskId, QStringLiteral("Follow-up TODO already exists"));
+            continue;
+        }
 
         const QString receivedText = message.value(QStringLiteral("receivedDateTime")).toString();
         QDateTime receivedAt = QDateTime::fromString(receivedText, Qt::ISODateWithMs);

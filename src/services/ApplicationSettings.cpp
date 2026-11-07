@@ -1,4 +1,5 @@
 #include "ApplicationSettings.h"
+#include "SenderRuleMatcher.h"
 
 #include <QSet>
 #include <QUrl>
@@ -38,6 +39,37 @@ bool ApplicationSettings::closeToTray() const
 int ApplicationSettings::defaultCountdownSeconds() const
 {
     return settings_.value(QStringLiteral("timers/defaultCountdownSeconds"), 300).toInt();
+}
+
+bool ApplicationSettings::drinkReminderEnabled() const
+{
+    return settings_.value(QStringLiteral("timers/drinkReminderEnabled"), false).toBool();
+}
+
+int ApplicationSettings::drinkReminderIntervalMinutes() const
+{
+    return qBound(1, settings_.value(QStringLiteral("timers/drinkReminderIntervalMinutes"), 60).toInt(), 1440);
+}
+
+bool ApplicationSettings::christmasTimerEnabled() const
+{
+    return settings_.value(QStringLiteral("timers/christmasTimerEnabled"), false).toBool();
+}
+
+QString ApplicationSettings::quickNoteShortcut() const
+{
+    return settings_.value(QStringLiteral("application/quickNoteShortcut"),
+                           QStringLiteral("Ctrl+Alt+N")).toString();
+}
+
+int ApplicationSettings::automaticMailScanIntervalMinutes() const
+{
+    return qBound(1, settings_.value(QStringLiteral("outlook/automaticMailScanIntervalMinutes"), 1).toInt(), 1440);
+}
+
+bool ApplicationSettings::desktopNotificationsEnabled() const
+{
+    return settings_.value(QStringLiteral("notifications/desktopEnabled"), true).toBool();
 }
 
 QString ApplicationSettings::outlookTenant() const
@@ -133,6 +165,38 @@ void ApplicationSettings::setDefaultCountdownSeconds(int seconds)
         settings_.setValue(QStringLiteral("timers/defaultCountdownSeconds"), seconds);
 }
 
+void ApplicationSettings::setDrinkReminderEnabled(bool enabled)
+{
+    settings_.setValue(QStringLiteral("timers/drinkReminderEnabled"), enabled);
+}
+
+void ApplicationSettings::setDrinkReminderIntervalMinutes(int minutes)
+{
+    if (minutes >= 1 && minutes <= 1440)
+        settings_.setValue(QStringLiteral("timers/drinkReminderIntervalMinutes"), minutes);
+}
+
+void ApplicationSettings::setChristmasTimerEnabled(bool enabled)
+{
+    settings_.setValue(QStringLiteral("timers/christmasTimerEnabled"), enabled);
+}
+
+void ApplicationSettings::setQuickNoteShortcut(const QString& shortcut)
+{
+    settings_.setValue(QStringLiteral("application/quickNoteShortcut"), shortcut);
+}
+
+void ApplicationSettings::setAutomaticMailScanIntervalMinutes(int minutes)
+{
+    if (minutes >= 1 && minutes <= 1440)
+        settings_.setValue(QStringLiteral("outlook/automaticMailScanIntervalMinutes"), minutes);
+}
+
+void ApplicationSettings::setDesktopNotificationsEnabled(bool enabled)
+{
+    settings_.setValue(QStringLiteral("notifications/desktopEnabled"), enabled);
+}
+
 void ApplicationSettings::setOutlookConfiguration(const QString& tenant, const QString& clientId)
 {
     settings_.setValue(QStringLiteral("outlook/tenant"), tenant.trimmed());
@@ -146,7 +210,7 @@ void ApplicationSettings::setIgnoredSenderRules(const QStringList& senders)
     for (const QString& sender : senders) {
         const QString trimmed = sender.trimmed();
         const QString key = trimmed.toCaseFolded();
-        if (trimmed.isEmpty() || seen.contains(key))
+        if (!isValidSenderRule(trimmed) || seen.contains(key))
             continue;
         seen.insert(key);
         normalized.append(trimmed);
@@ -161,7 +225,7 @@ void ApplicationSettings::setImportantSenderRules(const QStringList& senders)
     for (const QString& sender : senders) {
         const QString trimmed = sender.trimmed();
         const QString key = trimmed.toCaseFolded();
-        if (trimmed.isEmpty() || seen.contains(key))
+        if (!isValidSenderRule(trimmed) || seen.contains(key))
             continue;
         seen.insert(key);
         normalized.append(trimmed);

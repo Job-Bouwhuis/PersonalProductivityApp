@@ -4,6 +4,7 @@
 #include "MailIndexService.h"
 #include "MicrosoftGraphClient.h"
 #include "ApplicationSettings.h"
+#include "SenderRuleMatcher.h"
 #include "WorkDescriptorService.h"
 
 #include <QDateTime>
@@ -35,6 +36,7 @@
 #include <QVariant>
 #include <QVBoxLayout>
 
+#include <algorithm>
 #include <utility>
 
 #include <libxml/HTMLparser.h>
@@ -305,12 +307,15 @@ MailListWidget::MailListWidget(services::MailIndexService& mailIndex,
     searchInput_ = new QLineEdit(this);
     searchInput_->setPlaceholderText(QStringLiteral("Search sender or subject"));
     searchInput_->setClearButtonEnabled(true);
-    auto* refreshButton = new QPushButton(QStringLiteral("Refresh"), this);
-    auto* syncButton = new QPushButton(QStringLiteral("Sync mail changes"), this);
+    auto* refreshButton = new QPushButton(QStringLiteral("Refresh from Outlook"), this);
+    if (unreadOnly_) {
+        markAllReadButton_ = new QPushButton(QStringLiteral("Mark all as read"), this);
+        controls->addWidget(markAllReadButton_);
+        connect(markAllReadButton_, &QPushButton::clicked, this, &MailListWidget::startMarkAllUnreadAsRead);
+    }
     syncStatus_ = new QLabel(this);
     controls->addWidget(searchInput_, 1);
     controls->addWidget(refreshButton);
-    controls->addWidget(syncButton);
     controls->addWidget(syncStatus_, 1);
     layout->addLayout(controls);
 
@@ -334,7 +339,10 @@ MailListWidget::MailListWidget(services::MailIndexService& mailIndex,
     layout->addWidget(emptyState_);
     emptyState_->hide();
 
-    connect(refreshButton, &QPushButton::clicked, this, &MailListWidget::refreshMessages);
+    connect(refreshButton, &QPushButton::clicked, this, [this, &mailSync] {
+        refreshMessages();
+        mailSync.start();
+    });
     connect(searchInput_, &QLineEdit::textChanged, this, &MailListWidget::refreshMessages);
     connect(messages_, &QTableWidget::cellDoubleClicked, this, [this](int row, int) {
         const auto* item = messages_->item(row, 0);
@@ -348,6 +356,7 @@ MailListWidget::MailListWidget(services::MailIndexService& mailIndex,
         auto* dialogLayout = new QVBoxLayout(dialog);
         auto* loading = new QLabel(QStringLiteral("Loading message…"), dialog);
         dialogLayout->addWidget(loading);
+        dialog->setProperty("messageId", item->data(Qt::UserRole).toString());
         const quint64 requestId = graphClient_.getMessage(item->data(Qt::UserRole).toString());
         messageDialogs_.insert(requestId, dialog);
         connect(dialog, &QObject::destroyed, this, [this, requestId] { messageDialogs_.remove(requestId); });
@@ -355,6 +364,40 @@ MailListWidget::MailListWidget(services::MailIndexService& mailIndex,
     });
     connect(&graphClient_, &services::MicrosoftGraphClient::requestFinished, this,
             [this](quint64 requestId, int status, const QByteArray& response) {
+        if (requestId == markReadRequestId_) {
+            finishMarkReadRequest(status >= 200 && status < 300,
+                                  status >= 200 && status < 300
+                                      ? QString()
+                                      : QStringLiteral("Microsoft Graph returned HTTP %1.").arg(status));
+            return;
+        }
+        if (viewerMarkReadMessages_.contains(requestId)) {
+            const QString id = viewerMarkReadMessages_.take(requestId);
+            const QPointer<QPushButton> button = viewerMarkReadButtons_.take(requestId);
+            const bool success = status >= 200 && status < 300;
+            QString error;
+            if (success && !mailIndex_.setMessageReadState(id, true, error)) {
+                workService_.failTask(button ? button->property("workId").toString() : QString(), error);
+            } else if (success) {
+                workService_.completeTask(button ? button->property("workId").toString() : QString(),
+                                          QStringLiteral("Email marked as read in Outlook"));
+                if (button) {
+                    button->setEnabled(false);
+                    button->setText(QStringLiteral("Marked as read"));
+                }
+                if (auto* details = button ? button->parentWidget()->findChild<QLabel*>() : nullptr) {
+                    QString text = details->text();
+                    text.replace(QStringLiteral("Status: Unread"), QStringLiteral("Status: Read"));
+                    details->setText(text);
+                }
+                refreshMessages();
+            } else {
+                const QString detail = QStringLiteral("Could not mark email as read (HTTP %1). ").arg(status);
+                workService_.failTask(button ? button->property("workId").toString() : QString(), detail);
+                syncStatus_->setText(detail);
+            }
+            return;
+        }
         QDialog* dialog = messageDialogs_.take(requestId);
         if (!dialog)
             return;
@@ -374,6 +417,13 @@ MailListWidget::MailListWidget(services::MailIndexService& mailIndex,
         const QJsonObject message = messageDocument.object();
         const QJsonObject sender = message.value(QStringLiteral("from")).toObject()
                                        .value(QStringLiteral("emailAddress")).toObject();
+        const QString senderAddress = sender.value(QStringLiteral("address")).toString().trimmed();
+        const QString senderName = sender.value(QStringLiteral("name")).toString().trimmed();
+        const QStringList ignoredSenderRules = settings_.ignoredSenderRules();
+        const bool senderIsIgnored = std::any_of(ignoredSenderRules.cbegin(), ignoredSenderRules.cend(),
+            [&senderAddress, &senderName](const QString& rule) {
+                return services::senderRuleMatches(senderAddress, senderName, rule);
+            });
         const QJsonObject body = message.value(QStringLiteral("body")).toObject();
         const QString bodyType = body.value(QStringLiteral("contentType")).toString().toLower();
         const bool isHtml = bodyType == QLatin1String("html");
@@ -395,6 +445,109 @@ MailListWidget::MailListWidget(services::MailIndexService& mailIndex,
         details->setTextFormat(Qt::RichText);
         details->setWordWrap(true);
         layout->addWidget(details);
+        const QString messageId = dialog->property("messageId").toString();
+        auto* ignoredButton = new QPushButton(QStringLiteral("Ignore sender"), dialog);
+        auto* importantButton = new QPushButton(QStringLiteral("Important"), dialog);
+        ignoredButton->setCheckable(true);
+        importantButton->setCheckable(true);
+        const auto* rowItem = messages_->item(dialog->property("mailRow").toInt(), 1);
+        ignoredButton->setChecked(senderIsIgnored || (rowItem && rowItem->data(Qt::UserRole + 1).toBool()));
+        importantButton->setChecked(rowItem && rowItem->data(Qt::UserRole + 2).toBool());
+        auto* flagControls = new QHBoxLayout;
+        flagControls->addWidget(ignoredButton);
+        flagControls->addWidget(importantButton);
+        if (!message.value(QStringLiteral("isRead")).toBool()) {
+            auto* markReadButton = new QPushButton(QStringLiteral("Mark as read"), dialog);
+            flagControls->addWidget(markReadButton);
+            connect(markReadButton, &QPushButton::clicked, this,
+                    [this, markReadButton, messageId] {
+                if (!markReadButton->isEnabled())
+                    return;
+                markReadButton->setEnabled(false);
+                const QString workId = workService_.startTask(QStringLiteral("Mark email as read"));
+                markReadButton->setProperty("workId", workId);
+                const quint64 request = graphClient_.setMessageRead(messageId, true, workId);
+                viewerMarkReadMessages_.insert(request, messageId);
+                viewerMarkReadButtons_.insert(request, markReadButton);
+            });
+        }
+        flagControls->addStretch();
+        layout->addLayout(flagControls);
+        const auto saveFlags = [this, dialog, messageId, senderAddress, senderName, ignoredButton, importantButton]
+                               (bool updateSenderRule) {
+            const QString taskId = workService_.startTask(QStringLiteral("Update email flags"));
+            QString error;
+            bool senderRuleChanged = false;
+            if (updateSenderRule && !senderAddress.isEmpty()) {
+                const QStringList originalIgnoredSenders = settings_.ignoredSenderRules();
+                QStringList ignoredSenders = originalIgnoredSenders;
+                const auto exactRule = std::find_if(ignoredSenders.begin(), ignoredSenders.end(),
+                    [&senderAddress](const QString& rule) { return rule.compare(senderAddress, Qt::CaseInsensitive) == 0; });
+                const bool exactRuleExists = exactRule != ignoredSenders.end();
+                const bool anyRuleMatches = std::any_of(ignoredSenders.cbegin(), ignoredSenders.cend(),
+                    [&senderAddress, &senderName](const QString& rule) {
+                        return services::senderRuleMatches(senderAddress, senderName, rule);
+                    });
+                const bool shouldIgnoreSender = ignoredButton->isChecked();
+                bool changeRule = false;
+                if (shouldIgnoreSender && !anyRuleMatches) {
+                    ignoredSenders.append(senderAddress);
+                    changeRule = true;
+                } else if (!shouldIgnoreSender && exactRuleExists) {
+                    ignoredSenders.erase(exactRule);
+                    const bool stillMatched = std::any_of(ignoredSenders.cbegin(), ignoredSenders.cend(),
+                        [&senderAddress, &senderName](const QString& rule) {
+                            return services::senderRuleMatches(senderAddress, senderName, rule);
+                        });
+                    if (stillMatched) {
+                        ignoredButton->setChecked(true);
+                        const QString detail = QStringLiteral("This sender still matches a wildcard rule. Remove or edit that rule in Outlook settings.");
+                        workService_.failTask(taskId, detail);
+                        syncStatus_->setText(detail);
+                        return;
+                    }
+                    changeRule = true;
+                } else if (!shouldIgnoreSender && anyRuleMatches) {
+                    ignoredButton->setChecked(true);
+                    const QString detail = QStringLiteral("This sender matches a wildcard rule. Remove or edit that rule in Outlook settings.");
+                    workService_.failTask(taskId, detail);
+                    syncStatus_->setText(detail);
+                    return;
+                }
+                if (changeRule) {
+                    if (!mailIndex_.requestAllFolderRescans(error)) {
+                        ignoredButton->setChecked(!shouldIgnoreSender);
+                        workService_.failTask(taskId, error);
+                        QMessageBox::warning(dialog, QStringLiteral("Ignore rule not saved"), error);
+                        return;
+                    }
+                    settings_.setIgnoredSenderRules(ignoredSenders);
+                    if (!settings_.sync()) {
+                        settings_.setIgnoredSenderRules(originalIgnoredSenders);
+                        settings_.sync();
+                        ignoredButton->setChecked(!shouldIgnoreSender);
+                        workService_.failTask(taskId, QStringLiteral("Could not save the ignored sender rule"));
+                        QMessageBox::warning(dialog, QStringLiteral("Ignore rule not saved"),
+                            QStringLiteral("Could not save the sender rule. Try again from Outlook settings."));
+                        return;
+                    }
+                    senderRuleChanged = true;
+                    syncStatus_->setText(QStringLiteral("Sender rule queued for the next automatic scan."));
+                    emit ignoredSenderRulesChanged();
+                }
+            }
+            if (!mailIndex_.setMessageFlags(messageId, ignoredButton->isChecked(), importantButton->isChecked(), error)) {
+                workService_.failTask(taskId, error);
+                QMessageBox::warning(dialog, QStringLiteral("Email flags not saved"), error);
+                return;
+            }
+            workService_.completeTask(taskId, senderRuleChanged
+                ? QStringLiteral("Email flags saved; sender rule queued for the next automatic scan")
+                : QStringLiteral("Email flags saved locally"));
+            refreshMessages();
+        };
+        connect(ignoredButton, &QPushButton::clicked, dialog, [saveFlags] { saveFlags(true); });
+        connect(importantButton, &QPushButton::clicked, dialog, [saveFlags] { saveFlags(false); });
         if (isHtml && !bodyContent.isEmpty()) {
             QHash<QString, QByteArray> inlineImages;
             const QJsonArray attachments = message.value(QStringLiteral("attachments")).toArray();
@@ -523,6 +676,21 @@ MailListWidget::MailListWidget(services::MailIndexService& mailIndex,
     });
     connect(&graphClient_, &services::MicrosoftGraphClient::requestFailed, this,
             [this](quint64 requestId, const QString& error) {
+        if (requestId == markReadRequestId_) {
+            finishMarkReadRequest(false, error);
+            return;
+        }
+        if (viewerMarkReadMessages_.contains(requestId)) {
+            const QString id = viewerMarkReadMessages_.take(requestId);
+            Q_UNUSED(id);
+            const QPointer<QPushButton> button = viewerMarkReadButtons_.take(requestId);
+            if (button) {
+                button->setEnabled(true);
+                workService_.failTask(button->property("workId").toString(), error);
+            }
+            syncStatus_->setText(error);
+            return;
+        }
         QDialog* dialog = messageDialogs_.take(requestId);
         if (!dialog)
             return;
@@ -530,7 +698,6 @@ MailListWidget::MailListWidget(services::MailIndexService& mailIndex,
         if (label)
             label->setText(error);
     });
-    connect(syncButton, &QPushButton::clicked, &mailSync, &services::MailDeltaSyncService::start);
     connect(&mailSync, &services::MailDeltaSyncService::progressChanged, this,
             [this](const QString& status) { syncStatus_->setText(status); });
     connect(&mailSync, &services::MailDeltaSyncService::finished, this,
@@ -595,11 +762,18 @@ void MailListWidget::refreshMessages()
             ? received.toLocalTime().toString(QStringLiteral("yyyy-MM-dd HH:mm")) : QString();
         auto* senderItem = new QTableWidgetItem(sender);
         senderItem->setData(Qt::UserRole, message.messageId);
+        auto* subjectItem = new QTableWidgetItem(
+            (message.important ? QStringLiteral("★ ") : QString()) +
+            (message.ignored ? QStringLiteral("[Ignored] ") : QString()) + message.subject);
+        subjectItem->setData(Qt::UserRole + 1, message.ignored);
+        subjectItem->setData(Qt::UserRole + 2, message.important);
         messages_->setItem(row, 0, senderItem);
-        messages_->setItem(row, 1, new QTableWidgetItem(message.subject));
+        messages_->setItem(row, 1, subjectItem);
         messages_->setItem(row, 2, new QTableWidgetItem(receivedText));
     }
     const bool empty = mail.isEmpty();
+    if (markAllReadButton_)
+        markAllReadButton_->setEnabled(!indexedMail.isEmpty() && markReadRequestId_ == 0);
     if (empty) {
         emptyState_->setText(indexedMail.isEmpty()
             ? (unreadOnly_ ? QStringLiteral("No unread mail.") : QStringLiteral("No mail indexed yet."))
@@ -608,6 +782,73 @@ void MailListWidget::refreshMessages()
     messages_->setVisible(!empty);
     emptyState_->setVisible(empty);
     messages_->setUpdatesEnabled(true);
+}
+
+void MailListWidget::startMarkAllUnreadAsRead()
+{
+    if (!unreadOnly_ || markReadRequestId_ != 0)
+        return;
+    const auto unread = mailIndex_.unreadMessages();
+    if (unread.isEmpty()) {
+        refreshMessages();
+        return;
+    }
+
+    pendingMarkReadIds_.clear();
+    for (const auto& message : unread)
+        pendingMarkReadIds_.enqueue(message.messageId);
+    markReadTotal_ = pendingMarkReadIds_.size();
+    markReadSucceeded_ = 0;
+    markReadFailed_ = 0;
+    markReadWorkTaskId_ = workService_.startTask(QStringLiteral("Mark all unread mail as read"));
+    markAllReadButton_->setEnabled(false);
+    syncStatus_->setText(QStringLiteral("Marking %1 unread message(s) as read…").arg(markReadTotal_));
+    sendNextMarkReadRequest();
+}
+
+void MailListWidget::sendNextMarkReadRequest()
+{
+    if (pendingMarkReadIds_.isEmpty()) {
+        const QString detail = QStringLiteral("Marked %1 message(s) as read; %2 failed.")
+                                   .arg(markReadSucceeded_).arg(markReadFailed_);
+        if (markReadFailed_ == 0)
+            workService_.completeTask(markReadWorkTaskId_, detail);
+        else
+            workService_.failTask(markReadWorkTaskId_, detail);
+        syncStatus_->setText(detail);
+        markReadWorkTaskId_.clear();
+        currentMarkReadMessageId_.clear();
+        refreshMessages();
+        return;
+    }
+
+    currentMarkReadMessageId_ = pendingMarkReadIds_.dequeue();
+    markReadRequestId_ = graphClient_.setMessageRead(currentMarkReadMessageId_, true, markReadWorkTaskId_);
+    const int completed = markReadSucceeded_ + markReadFailed_;
+    workService_.updateTask(markReadWorkTaskId_,
+        QStringLiteral("Marked %1 of %2 unread messages as read…").arg(completed).arg(markReadTotal_),
+        markReadTotal_ > 0 ? std::optional<int>((completed * 100) / markReadTotal_) : std::nullopt);
+}
+
+void MailListWidget::finishMarkReadRequest(bool success, const QString& error)
+{
+    if (markReadRequestId_ == 0)
+        return;
+    markReadRequestId_ = 0;
+    if (success) {
+        QString databaseError;
+        if (mailIndex_.setMessageReadState(currentMarkReadMessageId_, true, databaseError)) {
+            ++markReadSucceeded_;
+        } else {
+            ++markReadFailed_;
+            qWarning("Could not update local mail state after remote mark-read success");
+        }
+    } else {
+        ++markReadFailed_;
+        if (!error.isEmpty())
+            syncStatus_->setText(error);
+    }
+    sendNextMarkReadRequest();
 }
 
 } // namespace productivity::ui

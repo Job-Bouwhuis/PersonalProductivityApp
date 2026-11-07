@@ -7,6 +7,8 @@
 
 namespace productivity::services {
 
+class TimerService;
+
 enum class TodoStatus {
     Open,
     Completed,
@@ -35,16 +37,18 @@ struct TodoRecord {
 class TodoService final
 {
 public:
-    explicit TodoService(QSqlDatabase database);
+    explicit TodoService(QSqlDatabase database, TimerService* timerService = nullptr);
 
     bool initialize();
     QList<TodoRecord> todos(TodoFilter filter = TodoFilter::All,
                             const QString& searchText = {}) const;
     QString saveTodo(const TodoRecord& todo);
+    bool hasEmailLinkedTodo(const QString& messageId) const;
     bool deleteTodo(const QString& id);
 
 private:
     QSqlDatabase database_;
+    TimerService* timerService_ = nullptr;
 };
 
 } // namespace productivity::services

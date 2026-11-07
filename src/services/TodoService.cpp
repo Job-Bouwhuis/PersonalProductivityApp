@@ -1,4 +1,5 @@
 #include "TodoService.h"
+#include "TimerService.h"
 
 #include <QLoggingCategory>
 #include <QSqlError>
@@ -71,8 +72,9 @@ bool validLink(const TodoRecord& todo, QSqlDatabase database)
 
 } // namespace
 
-TodoService::TodoService(QSqlDatabase database)
+TodoService::TodoService(QSqlDatabase database, TimerService* timerService)
     : database_(std::move(database))
+    , timerService_(timerService)
 {
 }
 
@@ -95,6 +97,35 @@ bool TodoService::initialize()
         return false;
     }
     qCInfo(todoLog) << "TODO storage initialized";
+    if (timerService_) {
+        struct ReminderTodo {
+            QString id;
+            QString title;
+            QString status;
+            QString deadline;
+        };
+        QList<ReminderTodo> reminders;
+        QSqlQuery query(database_);
+        if (!query.exec(QStringLiteral("SELECT id, title, status, deadline_utc FROM todos"))) {
+            qCWarning(todoLog) << "Could not reconcile TODO deadline reminders:" << query.lastError().text();
+        } else {
+            while (query.next())
+                reminders.append({query.value(0).toString(), query.value(1).toString(),
+                                  query.value(2).toString(), query.value(3).toString()});
+            query.finish();
+            for (const ReminderTodo& reminder : reminders) {
+                const QDateTime deadline = QDateTime::fromString(reminder.deadline, Qt::ISODate).toUTC();
+                const QString eventId = QStringLiteral("todo:%1").arg(reminder.id);
+                const bool open = reminder.status == QLatin1String("open");
+                if (open && deadline.isValid()) {
+                    if (timerService_->schedule(reminder.title, deadline, NotificationPolicy::Deadline, eventId).isEmpty())
+                        qCWarning(todoLog) << "Could not restore deadline reminder for TODO" << reminder.id;
+                } else {
+                    timerService_->cancel(eventId);
+                }
+            }
+        }
+    }
     return true;
 }
 
@@ -197,7 +228,32 @@ QString TodoService::saveTodo(const TodoRecord& todo)
         database_.rollback();
         return {};
     }
+    if (timerService_) {
+        const QString eventId = QStringLiteral("todo:%1").arg(id);
+        const TodoStatus status = todo.status;
+        if (status == TodoStatus::Open && todo.deadline.isValid()) {
+            if (timerService_->schedule(title, todo.deadline, NotificationPolicy::Deadline, eventId).isEmpty())
+                qCWarning(todoLog) << "TODO saved but deadline reminder could not be scheduled";
+        } else {
+            timerService_->cancel(eventId);
+        }
+    }
     return id;
+}
+
+bool TodoService::hasEmailLinkedTodo(const QString& messageId) const
+{
+    if (!database_.isOpen() || messageId.trimmed().isEmpty())
+        return false;
+    QSqlQuery query(database_);
+    query.prepare(QStringLiteral(
+        "SELECT 1 FROM todos WHERE link_type = 'email' AND link_target = :message_id LIMIT 1"));
+    query.bindValue(QStringLiteral(":message_id"), messageId);
+    if (!query.exec()) {
+        qCWarning(todoLog) << "Could not check for an existing email-linked TODO:" << query.lastError().text();
+        return false;
+    }
+    return query.next();
 }
 
 bool TodoService::deleteTodo(const QString& id)
@@ -209,7 +265,10 @@ bool TodoService::deleteTodo(const QString& id)
         qCWarning(todoLog) << "Could not delete TODO item:" << query.lastError().text();
         return false;
     }
-    return query.numRowsAffected() == 1;
+    const bool deleted = query.numRowsAffected() == 1;
+    if (deleted && timerService_)
+        timerService_->cancel(QStringLiteral("todo:%1").arg(id));
+    return deleted;
 }
 
 } // namespace productivity::services

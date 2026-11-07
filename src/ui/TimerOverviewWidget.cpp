@@ -152,7 +152,7 @@ void TimerOverviewWidget::addCountdown()
     const QString workId = workService_.startTask(QStringLiteral("Create countdown timer"));
     workService_.updateTask(workId, QStringLiteral("Saving timer…"));
     const QString eventId = timerService_.schedule(
-        title, deadline, services::NotificationPolicy::Deadline);
+        title, deadline, services::NotificationPolicy::Deadline, {}, true);
     if (eventId.isEmpty()) {
         workService_.failTask(workId, QStringLiteral("Could not save the timer"));
         showStatus(QStringLiteral("Could not save the timer. See the application log for details."));

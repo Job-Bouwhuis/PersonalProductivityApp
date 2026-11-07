@@ -21,6 +21,10 @@ set(QT_DEPLOY_LIB_DIR "${CMAKE_INSTALL_LIBDIR}")
 set(QT_DEPLOY_PLUGINS_DIR "${CMAKE_INSTALL_LIBDIR}/plugins")
 
 find_package(Qt6 6.12 REQUIRED COMPONENTS Widgets Sql DBus Network)
+include(CTest)
+if(BUILD_TESTING)
+    find_package(Qt6 6.12 REQUIRED COMPONENTS Test)
+endif()
 find_package(Qt6 6.12 QUIET COMPONENTS Svg)
 find_package(LibXml2 REQUIRED)
 
@@ -52,6 +56,8 @@ add_library(productivity_services STATIC
     src/services/MicrosoftGraphClient.h
     src/services/OutlookAuthService.cpp
     src/services/OutlookAuthService.h
+    src/services/SenderRuleMatcher.cpp
+    src/services/SenderRuleMatcher.h
     src/services/TodoService.cpp
     src/services/TimerService.cpp
     src/services/WorkDescriptorService.cpp
@@ -78,6 +84,8 @@ target_include_directories(productivity_ui PUBLIC
 
 add_executable(personal-productivity-app
     src/app/main.cpp
+    src/infrastructure/GlobalShortcutService.cpp
+    src/infrastructure/GlobalShortcutService.h
     src/infrastructure/logging/ApplicationLogger.cpp
     src/infrastructure/notifications/NotificationCoordinator.cpp
     src/infrastructure/persistence/ApplicationDatabase.cpp
@@ -92,6 +100,16 @@ target_link_libraries(personal-productivity-app
 )
 if(TARGET Qt6::Svg)
     target_link_libraries(personal-productivity-app PRIVATE Qt6::Svg)
+endif()
+
+if(BUILD_TESTING)
+    add_executable(timer_deadline_test tests/TimerDeadlineTest.cpp)
+    target_link_libraries(timer_deadline_test PRIVATE productivity_services Qt6::Test)
+    add_test(NAME timer_deadline_test COMMAND timer_deadline_test)
+
+    add_executable(mail_deduplication_test tests/MailDeduplicationTest.cpp)
+    target_link_libraries(mail_deduplication_test PRIVATE productivity_services Qt6::Test)
+    add_test(NAME mail_deduplication_test COMMAND mail_deduplication_test)
 endif()
 
 install(TARGETS personal-productivity-app

@@ -16,6 +16,8 @@ struct IndexedMailSummary
     QString senderName;
     QString senderAddress;
     QString receivedAtUtc;
+    bool ignored = false;
+    bool important = false;
 };
 
 class MailIndexService final
@@ -27,7 +29,9 @@ public:
     int indexMessages(const QJsonArray& messages, QString& error,
                       QJsonArray* newlyInsertedMessages = nullptr);
     bool setMessageReadState(const QString& messageId, bool isRead, QString& error);
+    bool setMessageFlags(const QString& messageId, bool ignored, bool important, QString& error);
     int indexedMessageCount() const;
+    bool allMessagesKnown(const QJsonArray& messages, bool& allKnown, QString& error) const;
     QVector<IndexedMailSummary> allMessages() const;
     QVector<IndexedMailSummary> unreadMessages() const;
     bool initialMailboxScanComplete() const;

@@ -2,10 +2,13 @@
 
 #include <QWidget>
 #include <QHash>
+#include <QPointer>
+#include <QQueue>
 
 class QLabel;
 class QDialog;
 class QLineEdit;
+class QPushButton;
 class QTableWidget;
 class QTimer;
 
@@ -32,8 +35,14 @@ public:
                    QWidget* parent = nullptr);
     void openMessageById(const QString& messageId);
 
+signals:
+    void ignoredSenderRulesChanged();
+
 private:
     void refreshMessages();
+    void startMarkAllUnreadAsRead();
+    void sendNextMarkReadRequest();
+    void finishMarkReadRequest(bool success, const QString& error = {});
 
     services::MailIndexService& mailIndex_;
     services::MicrosoftGraphClient& graphClient_;
@@ -44,8 +53,18 @@ private:
     QLineEdit* searchInput_ = nullptr;
     QLabel* emptyState_ = nullptr;
     QLabel* syncStatus_ = nullptr;
+    QPushButton* markAllReadButton_ = nullptr;
     QTimer* refreshTimer_ = nullptr;
     QHash<quint64, QDialog*> messageDialogs_;
+    QHash<quint64, QString> viewerMarkReadMessages_;
+    QHash<quint64, QPointer<QPushButton>> viewerMarkReadButtons_;
+    QQueue<QString> pendingMarkReadIds_;
+    quint64 markReadRequestId_ = 0;
+    int markReadTotal_ = 0;
+    int markReadSucceeded_ = 0;
+    int markReadFailed_ = 0;
+    QString markReadWorkTaskId_;
+    QString currentMarkReadMessageId_;
 };
 
 } // namespace productivity::ui

@@ -1,8 +1,11 @@
 #include <QApplication>
 #include <QAction>
 #include <QCloseEvent>
+#include <QDate>
 #include <QDir>
+#include <QDialog>
 #include <QIcon>
+#include <QKeySequence>
 #include <QLoggingCategory>
 #include <QMenu>
 #include <QJsonArray>
@@ -11,15 +14,20 @@
 #include <QStandardPaths>
 #include <QSystemTrayIcon>
 #include <QTabWidget>
+#include <QStringList>
 #include <QStatusBar>
 #include <QProgressBar>
 #include <QVBoxLayout>
 #include <QLabel>
+#include <QPlainTextEdit>
+#include <QPushButton>
 
 #include <memory>
+#include <algorithm>
 
 #include "logging/ApplicationLogger.h"
 #include "notifications/NotificationCoordinator.h"
+#include "GlobalShortcutService.h"
 #include "persistence/ApplicationDatabase.h"
 #include "DeadlineMonitor.h"
 #include "ImportantSenderTodoService.h"
@@ -88,6 +96,7 @@ int main(int argc, char* argv[])
     QApplication app(argc, argv);
     QApplication::setApplicationName("Personal Productivity Service");
     QApplication::setOrganizationName("PersonalProductivityApp");
+    QGuiApplication::setDesktopFileName(QStringLiteral("personal-productivity-app"));
 
     productivity::infrastructure::initializeApplicationLogging();
 
@@ -110,7 +119,7 @@ int main(int argc, char* argv[])
     const bool timersReady = timerService.initialize();
     productivity::services::NotesService notesService(database.connection());
     const bool notesReady = notesService.initialize();
-    productivity::services::TodoService todoService(database.connection());
+    productivity::services::TodoService todoService(database.connection(), timersReady ? &timerService : nullptr);
     const bool todosReady = todoService.initialize();
     if (!timersReady)
         qCWarning(startupLog) << "Timer service is unavailable; continuing with other services";
@@ -146,7 +155,55 @@ int main(int argc, char* argv[])
     QSystemTrayIcon trayIcon(QIcon(":/app.svg"));
     trayIcon.setToolTip("Personal Productivity Service");
     productivity::infrastructure::NotificationCoordinator notificationCoordinator(&trayIcon,
-                                                                                   workDescriptorService);
+                                                                                   workDescriptorService, settings);
+    productivity::infrastructure::GlobalShortcutService globalShortcutService(QKeySequence(settings.quickNoteShortcut()), &app);
+    const auto applyDrinkReminder = [&timerService, &notificationCoordinator, timersReady]
+                                    (bool enabled, int intervalMinutes, bool startup) {
+        const QString eventId = QStringLiteral("drink-reminder");
+        if (!timersReady)
+            return !enabled;
+        if (!enabled) {
+            timerService.cancel(eventId);
+            return true;
+        }
+        const qint64 intervalMs = static_cast<qint64>(intervalMinutes) * 60 * 1000;
+        for (const auto& event : timerService.timerEvents()) {
+            if (event.id == eventId && event.notificationPolicy == productivity::services::NotificationPolicy::Recurring &&
+                event.recurrenceIntervalMilliseconds == intervalMs && !startup)
+                return true;
+        }
+        const QString scheduledId = timerService.schedule(
+            QStringLiteral("Drink reminder"), QDateTime::currentDateTimeUtc().addMSecs(intervalMs),
+            productivity::services::NotificationPolicy::Recurring, eventId, true, intervalMs);
+        if (scheduledId.isEmpty())
+            return false;
+        if (startup && !notificationCoordinator.notify(QStringLiteral("Drink reminder"),
+                                                        QStringLiteral("Time to drink some water!")))
+            qCWarning(startupLog) << "Could not show the startup drink reminder";
+        return true;
+    };
+    if (!applyDrinkReminder(settings.drinkReminderEnabled(), settings.drinkReminderIntervalMinutes(), true))
+        qCWarning(startupLog) << "Could not restore the saved drink reminder schedule";
+    const auto applyChristmasTimer = [&timerService, timersReady](bool enabled) {
+        const QString eventId = QStringLiteral("christmas-timer");
+        if (!timersReady)
+            return !enabled;
+        if (!enabled) {
+            timerService.cancel(eventId);
+            return true;
+        }
+        for (const auto& event : timerService.activeEvents()) {
+            if (event.id == eventId && event.deadline > QDateTime::currentDateTimeUtc() &&
+                event.notificationPolicy == productivity::services::NotificationPolicy::Recurring &&
+                event.recurrenceIntervalMilliseconds == -1)
+                return true;
+        }
+        const QDateTime deadline = productivity::services::TimerService::nextChristmasDeadline().toUTC();
+        return !timerService.schedule(QStringLiteral("Christmas"), deadline,
+            productivity::services::NotificationPolicy::Recurring, eventId, false, -1).isEmpty();
+    };
+    if (!applyChristmasTimer(settings.christmasTimerEnabled()))
+        qCWarning(startupLog) << "Could not restore the saved Christmas timer";
 
     ProductivityWindow window;
     window.setWindowTitle("Personal Productivity Service");
@@ -163,6 +220,7 @@ int main(int argc, char* argv[])
         tabs->addTab(unavailableServicePage(QStringLiteral("Countdown timers"), tabs), QStringLiteral("Timers"));
     }
     productivity::ui::NotesWidget* notesWidget = nullptr;
+    productivity::ui::MailListWidget* unreadMailWidget = nullptr;
     productivity::ui::MailListWidget* allMailWidget = nullptr;
     QWidget* notesPage = nullptr;
     if (notesReady) {
@@ -171,6 +229,52 @@ int main(int argc, char* argv[])
     } else {
         notesPage = unavailableServicePage(QStringLiteral("Notes"), tabs);
     }
+    QDialog quickNoteWindow;
+    quickNoteWindow.setWindowTitle(QStringLiteral("Quick note"));
+    quickNoteWindow.resize(440, 300);
+    auto* quickNoteLayout = new QVBoxLayout(&quickNoteWindow);
+    auto* quickNoteInput = new QPlainTextEdit(&quickNoteWindow);
+    quickNoteInput->setPlaceholderText(QStringLiteral("What do you want to remember?"));
+    quickNoteInput->setAccessibleName(QStringLiteral("Quick note"));
+    quickNoteLayout->addWidget(quickNoteInput, 1);
+    auto* quickNoteStatus = new QLabel(&quickNoteWindow);
+    quickNoteLayout->addWidget(quickNoteStatus);
+    auto* saveQuickNote = new QPushButton(QStringLiteral("Capture quick note"), &quickNoteWindow);
+    quickNoteLayout->addWidget(saveQuickNote, 0, Qt::AlignRight);
+    quickNoteWindow.setVisible(false);
+    QObject::connect(saveQuickNote, &QPushButton::clicked, &quickNoteWindow,
+                     [&notesService, &notesReady, &workDescriptorService, quickNoteInput,
+                      quickNoteStatus, &quickNoteWindow] {
+        if (!notesReady) {
+            quickNoteStatus->setText(QStringLiteral("Notes are unavailable."));
+            return;
+        }
+        const QString content = quickNoteInput->toPlainText().trimmed();
+        if (content.isEmpty()) {
+            quickNoteStatus->setText(QStringLiteral("Enter a note before saving."));
+            quickNoteInput->setFocus();
+            return;
+        }
+        const QString workId = workDescriptorService.startTask(QStringLiteral("Capture quick note"));
+        if (notesService.captureQuickNote(content).isEmpty()) {
+            workDescriptorService.failTask(workId, QStringLiteral("Could not capture quick note"));
+            quickNoteStatus->setText(QStringLiteral("Could not save the quick note."));
+            return;
+        }
+        workDescriptorService.completeTask(workId, QStringLiteral("Quick note captured"));
+        quickNoteInput->clear();
+        quickNoteStatus->setText(QStringLiteral("Quick note captured."));
+        quickNoteWindow.hide();
+    });
+    QObject::connect(&globalShortcutService, &productivity::infrastructure::GlobalShortcutService::quickNoteShortcutActivated,
+                     &quickNoteWindow, [&quickNoteWindow, quickNoteInput, quickNoteStatus] {
+        quickNoteInput->clear();
+        quickNoteStatus->clear();
+        quickNoteWindow.show();
+        quickNoteWindow.raise();
+        quickNoteWindow.activateWindow();
+        quickNoteInput->setFocus(Qt::ShortcutFocusReason);
+    });
     if (todosReady) {
         tabs->addTab(new productivity::ui::TodoOverviewWidget(todoService, notesService, mailIndexService,
             workDescriptorService,
@@ -199,7 +303,7 @@ int main(int argc, char* argv[])
     }
     tabs->addTab(notesPage, QStringLiteral("Notes"));
     if (mailIndexReady) {
-        auto* unreadMailWidget = new productivity::ui::MailListWidget(
+        unreadMailWidget = new productivity::ui::MailListWidget(
             mailIndexService, mailDeltaSync, graphClient, settings, workDescriptorService, true, tabs);
         tabs->addTab(unreadMailWidget, QStringLiteral("Unread"));
         allMailWidget = new productivity::ui::MailListWidget(
@@ -211,7 +315,7 @@ int main(int argc, char* argv[])
     }
     auto* workActivityWidget = new productivity::ui::WorkActivityWidget(workDescriptorService, tabs);
     tabs->addTab(workActivityWidget, QStringLiteral("Activity"));
-    tabs->addTab(new productivity::ui::SettingsWidget(settings, outlookAuthService, graphClient,
+    auto* settingsWidget = new productivity::ui::SettingsWidget(settings, outlookAuthService, graphClient,
         mailIndexService, mailDeltaSync, workDescriptorService, trayAvailable,
         [&autostartService](bool enabled) { return autostartService.setEnabled(enabled); },
         [&window](bool closeToTray) {
@@ -221,12 +325,31 @@ int main(int argc, char* argv[])
             if (timerWidget)
                 timerWidget->setDefaultDuration(seconds);
         },
+        [&applyDrinkReminder](bool enabled, int intervalMinutes) {
+            return applyDrinkReminder(enabled, intervalMinutes, false);
+        },
+        applyChristmasTimer,
+        globalShortcutService.supportsInAppConfiguration(),
+        globalShortcutService.supportsPortalConfiguration(),
+        [&globalShortcutService](const QKeySequence& shortcut) {
+            return globalShortcutService.setQuickNoteShortcut(shortcut);
+        },
+        [&globalShortcutService] { return globalShortcutService.configureQuickNoteShortcut(); },
         [&deadlineMonitorControl] {
             if (deadlineMonitorControl)
                 deadlineMonitorControl->restart();
         }, [&notificationCoordinator](const QString& title, const QString& message) {
             return notificationCoordinator.notify(title, message);
-        }, tabs), QStringLiteral("Settings"));
+        }, tabs);
+    tabs->addTab(settingsWidget, QStringLiteral("Settings"));
+    if (unreadMailWidget) {
+        QObject::connect(unreadMailWidget, &productivity::ui::MailListWidget::ignoredSenderRulesChanged,
+                         settingsWidget, [settingsWidget] { settingsWidget->refreshIgnoredSenderRules(); });
+    }
+    if (allMailWidget) {
+        QObject::connect(allMailWidget, &productivity::ui::MailListWidget::ignoredSenderRulesChanged,
+                         settingsWidget, [settingsWidget] { settingsWidget->refreshIgnoredSenderRules(); });
+    }
     window.setCentralWidget(tabs);
     auto* activitySummary = new QLabel(QStringLiteral("No background work"), &window);
     auto* activityProgress = new QProgressBar(&window);
@@ -304,6 +427,47 @@ int main(int argc, char* argv[])
     app.setQuitOnLastWindowClosed(true);
     if (trayAvailable) {
         trayIcon.show();
+    }
+
+    if (todosReady && mailIndexReady) {
+        const auto startupOverviewSent = std::make_shared<bool>(false);
+        QObject::connect(&mailDeltaSync, &productivity::services::MailDeltaSyncService::finished, &app,
+                         [&todoService, &mailIndexService, &notificationCoordinator, startupOverviewSent]
+                         (int, int, int) {
+            if (*startupOverviewSent)
+                return;
+            *startupOverviewSent = true;
+            const QDate today = QDate::currentDate();
+            QStringList dueTodayTitles;
+            for (const auto& todo : todoService.todos(productivity::services::TodoFilter::All)) {
+                if (todo.status != productivity::services::TodoStatus::Open || !todo.deadline.isValid() ||
+                    todo.deadline.toLocalTime().date() != today)
+                    continue;
+                QString title = todo.title.trimmed();
+                if (title.isEmpty())
+                    title = QStringLiteral("Untitled TODO");
+                if (title.size() > 48)
+                    title = title.left(45) + QStringLiteral("…");
+                dueTodayTitles.append(title);
+            }
+
+            const auto unread = mailIndexService.unreadMessages();
+            const auto importantUnread = std::count_if(unread.cbegin(), unread.cend(),
+                [](const auto& message) { return message.important; });
+            QString dueSummary;
+            if (dueTodayTitles.isEmpty()) {
+                dueSummary = QStringLiteral("TODOs due today: none.");
+            } else {
+                QStringList displayedTitles = dueTodayTitles.mid(0, 4);
+                if (dueTodayTitles.size() > displayedTitles.size())
+                    displayedTitles.append(QStringLiteral("+%1 more").arg(dueTodayTitles.size() - displayedTitles.size()));
+                dueSummary = QStringLiteral("TODOs due today (%1): %2.")
+                                 .arg(dueTodayTitles.size()).arg(displayedTitles.join(QStringLiteral("; ")));
+            }
+            const QString message = QStringLiteral("%1\nUnread mail: %2 (important: %3).")
+                                        .arg(dueSummary).arg(unread.size()).arg(importantUnread);
+            notificationCoordinator.notify(QStringLiteral("Today's overview"), message, {}, {}, 8000);
+        });
     }
 
     std::unique_ptr<productivity::services::DeadlineMonitor> deadlineMonitor;

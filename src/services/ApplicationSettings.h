@@ -13,6 +13,12 @@ public:
     bool startOnLogin() const;
     bool closeToTray() const;
     int defaultCountdownSeconds() const;
+    bool drinkReminderEnabled() const;
+    int drinkReminderIntervalMinutes() const;
+    bool christmasTimerEnabled() const;
+    QString quickNoteShortcut() const;
+    int automaticMailScanIntervalMinutes() const;
+    bool desktopNotificationsEnabled() const;
     QString outlookTenant() const;
     QString outlookClientId() const;
     QStringList ignoredSenderRules() const;
@@ -26,6 +32,12 @@ public:
     void setStartOnLogin(bool enabled);
     void setCloseToTray(bool enabled);
     void setDefaultCountdownSeconds(int seconds);
+    void setDrinkReminderEnabled(bool enabled);
+    void setDrinkReminderIntervalMinutes(int minutes);
+    void setChristmasTimerEnabled(bool enabled);
+    void setQuickNoteShortcut(const QString& shortcut);
+    void setAutomaticMailScanIntervalMinutes(int minutes);
+    void setDesktopNotificationsEnabled(bool enabled);
     void setOutlookConfiguration(const QString& tenant, const QString& clientId);
     void setIgnoredSenderRules(const QStringList& senders);
     void setImportantSenderRules(const QStringList& senders);

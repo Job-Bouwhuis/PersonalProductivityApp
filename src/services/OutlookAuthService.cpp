@@ -105,11 +105,26 @@ void OutlookAuthService::restoreConnectionStatus(const QString& tenant, const QS
             return;
         }
         if (*timedOut) {
-            emit statusChanged(QStringLiteral("The system credential store did not respond. Unlock it, then reopen Outlook settings."));
+            emit statusChanged(QStringLiteral("The system credential store is still locked or responding slowly. Unlock it; Outlook will check again automatically."));
             process->deleteLater();
+            QTimer::singleShot(15000, this, [this, generation, tenant, clientId] {
+                if (generation == authorizationGeneration_)
+                    restoreConnectionStatus(tenant, clientId);
+            });
             return;
         }
         if (exitStatus != QProcess::NormalExit || exitCode != 0) {
+            const QString credentialStoreError = QString::fromLocal8Bit(process->readAllStandardError()).toCaseFolded();
+            if (credentialStoreError.contains(QStringLiteral("locked")) ||
+                credentialStoreError.contains(QStringLiteral("unlock"))) {
+                emit statusChanged(QStringLiteral("The system credential store is locked. Unlock it; Outlook will check again automatically."));
+                process->deleteLater();
+                QTimer::singleShot(15000, this, [this, generation, tenant, clientId] {
+                    if (generation == authorizationGeneration_)
+                        restoreConnectionStatus(tenant, clientId);
+                });
+                return;
+            }
             emit statusChanged(QStringLiteral("No saved Outlook sign-in was found. Choose Connect to Outlook to get started."));
             process->deleteLater();
             return;
@@ -140,7 +155,7 @@ void OutlookAuthService::restoreConnectionStatus(const QString& tenant, const QS
         emit statusChanged(QStringLiteral("The system credential store helper is unavailable. Install Secret Service to use Outlook."));
         process->deleteLater();
     });
-    QTimer::singleShot(5000, process, [process, timedOut] {
+    QTimer::singleShot(60000, process, [process, timedOut] {
         if (process->state() == QProcess::Running) {
             *timedOut = true;
             process->kill();
