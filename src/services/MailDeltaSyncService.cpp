@@ -32,6 +32,18 @@ MailDeltaSyncService::MailDeltaSyncService(MicrosoftGraphClient& graphClient,
             [this](quint64 requestId, int httpStatus, const QByteArray& body) {
         if (requestId == readRequestId_) {
             readRequestId_ = 0;
+            if (httpStatus == 404) {
+                // A message can disappear after Graph returned it in a delta page.
+                // Do not let that stale item prevent the folder cursor from advancing.
+                QString error;
+                if (!mailIndex_.removeMessages({readMessageId_}, error)) {
+                    fail(error + QStringLiteral(" The synchronization cursor was kept so this message can be retried."));
+                    return;
+                }
+                readMessageId_.clear();
+                markNextIgnoredSenderMessageRead();
+                return;
+            }
             if (httpStatus < 200 || httpStatus >= 300) {
                 fail(QStringLiteral("Microsoft Graph could not mark an ignored message as read (HTTP %1). %2 The synchronization cursor was kept so the change can be retried.")
                      .arg(httpStatus).arg(MicrosoftGraphClient::httpFailureGuidance(httpStatus)));

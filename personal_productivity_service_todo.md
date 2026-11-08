@@ -70,6 +70,7 @@ The most important architectural decision is to make the background services, ti
 - [x] Automatically mark messages in ignored folders as read in the remote mail service. Delta sync marks unread messages in explicitly selected folders as read through Graph, falls back to the active delta folder ID if Graph omits parentFolderId, and updates the local index after Microsoft confirms success. Existing messages are reconciled on the next scheduled scan.
 - [x] Apply rules to incoming mail and reconcile rules against existing messages when appropriate. Delta synchronization applies current rules to incoming/changed messages; adding a sender or folder rule persists a rescan request for the next scheduled system scan, and rescan requests remain until a successful folder scan completes.
 - [x] Handle failures to update remote read status and retry safely. Graph retries transient failures; if a read-state update still fails, sync stops before saving the folder delta cursor so the batch is replayed next time.
+- [x] Let mailbox synchronization recover when an ignored message disappears before its read-state update. A Graph 404 removes that stale message from the local index and continues the delta page so it cannot permanently block scanning.
 - [x] Provide an **Unread mail** view:
   - [x] Include unread messages across all accessible folders, not just the inbox. The view reads all unread rows from the local index, which is populated by mailbox scans and per-folder delta synchronization.
   - [x] Sort newest first.
